@@ -236,7 +236,7 @@ export default class CombatScene extends Phaser.Scene {
         .image(this.playerX, this.groundY, id)
         .setOrigin(0.5)
         .setAngle(WEAPON_HAND.angle)
-        .setDepth(this.parallax.topDepth + 1.5); // 캐릭터 바로 위
+        .setDepth(this.parallax.topDepth + WEAPON_HAND.depthOffset); // 캐릭터(+1)보다 확실히 위
     } else {
       this.weaponSprite.setTexture(id);
     }

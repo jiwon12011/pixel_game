@@ -24,17 +24,21 @@ export const PLAYER = {
 // ── 무기 손표시 (R7 #6) ─────────────────────────────────────────────────
 // stage_01은 맨손이라 장착 무기 아이콘을 손 근처에 오버레이한다. 헤드리스라 정확한
 // 손 픽셀 위치는 모르므로 추정값 — 육안 튜닝 전제로 여기 상수만 만지면 된다.
-//   offsetX     — 캐릭터 몸 중심(playerX) 기준 가로(+ = 전방/오른쪽). 손이 앞으로 나온 위치.
+//   offsetX     — 캐릭터 몸 중심(playerX≈108) 기준 가로(+ = 전방/오른쪽). 손이 앞으로 나온 위치.
+//                 캐릭터 몸 우측 실루엣이 x≈150이라, 무기를 전방으로 충분히 내밀어야 몸에
+//                 안 묻히고 배경과 겹쳐 또렷이 보인다(과거 18은 몸 한복판이라 묻혔음).
 //   heightRatio — groundY(발끝)에서 위로 charDisplayH*ratio 지점이 손 높이. 0=발, 1=머리끝.
 //   offsetY     — 손 높이 미세 보정 px(+아래).
-//   displaySize — 화면상 무기 표시 높이 px(원본 128에서 스케일 산출).
+//   displaySize — 화면상 무기 표시 높이 px(원본 128 webp에서 스케일 산출). 30은 너무 작아 묻혔음.
 //   angle       — 무기 기울기(°). 아이콘이라 살짝 기울여 쥔 느낌만.
+//   depthOffset — parallax.topDepth 기준 깊이 가산(캐릭터=+1보다 확실히 위, HUD=50+보단 아래).
 export const WEAPON_HAND = {
-  offsetX: 18,
-  heightRatio: 0.4,
+  offsetX: 42,
+  heightRatio: 0.42,
   offsetY: 0,
-  displaySize: 30,
-  angle: -22
+  displaySize: 54,
+  angle: -22,
+  depthOffset: 5
 };
 
 // 적 타입별 스탯. 키는 텍스처 키(=파일명)와 1:1.
