@@ -1,0 +1,21 @@
+{
+  "name": "last-salvage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LAST SALVAGE — 모바일 픽셀 로그라이크 (Phaser 3 + Vite)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "optimize:bg": "node scripts/optimize-bg.mjs",
+    "optimize:assets": "node scripts/optimize-assets.mjs"
+  },
+  "dependencies": {
+    "phaser": "^3.80.1"
+  },
+  "devDependencies": {
+    "sharp": "^0.35.1",
+    "vite": "^5.4.0"
+  }
+}
