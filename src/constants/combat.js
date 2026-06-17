@@ -75,7 +75,7 @@ export function waveParams(w) {
 // 적이 어떤 속성에 내성을 학습하는지의 기준. R4선 미사용(자리만 확보).
 // 현재 적 + 기획서 예정 적까지 full map으로 둬 R5에서 바로 연결.
 export const ENEMY_MEMORY_MAP = {
-  sludge_zombie: 'PHYSICAL',
+  sludge_zombie: 'SHOCK',
   flanker_zombie: 'PHYSICAL',
   grabber: 'PHYSICAL',
   putrifier: 'TOXIC',
@@ -98,7 +98,8 @@ export const COMBAT_COLORS = {
 export const COMBAT_CSS = {
   damage: '#ff6020',
   pierce: '#66ddff', // 관통 추가타 — 감전빛 청록으로 구분
-  playerHurt: '#ffd0d0'
+  playerHurt: '#ffd0d0',
+  resisted: '#8a8a8a' // R5 적기억 내성 히트 — 무채색 회색으로 "안 통함" 신호
 };
 
 // 모션 연출 타이밍/수치 상수 — motion-engineer 전담 튜닝 영역.

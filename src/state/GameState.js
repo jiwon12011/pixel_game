@@ -16,9 +16,32 @@
 
 import { WAVE } from '../constants/combat.js';
 import { STAT_UPGRADES } from '../constants/crafting.js';
-import { freshMeta, freshLegacy, MEMORY_DECAY } from '../constants/meta.js';
+import {
+  freshMeta,
+  freshLegacy,
+  MEMORY_DECAY,
+  MEMORY_TIERS,
+  MEMORY_ATTRS
+} from '../constants/meta.js';
 
 const PARTS = ['SCRAP', 'ELEC', 'POWDER'];
+
+// R5 적기억 스냅샷 — tally(누적 학습)에서 속성별 데미지 배율을 파생한다.
+// 런 시작 시 1회만 호출해 runResistance에 고정(스냅샷). 런 중엔 tally가 자라도
+// 이 값은 안 바뀐다 → "이전 런에 많이 쓴 속성 = 이번 런 그 적이 내성"을 보장.
+// MEMORY_TIERS는 threshold 오름차순 — 충족하는 가장 높은 tier의 mult가 최종값.
+function deriveResistance(tally) {
+  const res = {};
+  for (const attr of MEMORY_ATTRS) {
+    const t = tally[attr] || 0;
+    let mult = 1.0;
+    for (const tier of MEMORY_TIERS) {
+      if (t >= tier.threshold) mult = tier.mult;
+    }
+    res[attr] = mult;
+  }
+  return res;
+}
 
 const RUN_KEY = 'last-salvage:run:v1';
 const META_KEY = 'last-salvage:meta:v1';
@@ -53,6 +76,10 @@ const GameState = {
 
   // ── meta: 런 간 영구 (유산/도감/적기억) ─────────────────────────────────
   meta: freshMeta(),
+
+  // ── R5 적기억: 현재 런 고정 내성 스냅샷 { PHYSICAL:mult, ... } ──────────
+  // resetRun(새 런)·load(부팅 resume)에서 (감쇠된) tally로 파생해 런 내내 불변.
+  runResistance: deriveResistance(freshMeta().enemyMemory.tally),
 
   // ── 이벤트 ──────────────────────────────────────────────────────────
   on(event, fn) {
@@ -144,6 +171,8 @@ const GameState = {
   resetRun(legacy) {
     Object.assign(this, baseRun());
     if (legacy && legacy.type) this.applyLegacy(legacy);
+    // R5 내성 스냅샷 — 이 시점의 (startNewRun에서 이미 감쇠된) tally로 고정.
+    this.runResistance = deriveResistance(this.meta.enemyMemory.tally);
     this._markRunDirty();
   },
 
@@ -271,6 +300,9 @@ const GameState = {
     this.loadMeta(); // 영구 메타 먼저
     this.migrateOldSave(); // 구 단일키 → 도감 씨앗 이관(메타 비었을 때만) + 구키 제거
     this.loadRun(); // 진행 중이던 런(없으면 base 유지)
+    // 부팅 resume 경로는 startNewRun/resetRun을 안 거친다 → 여기서 스냅샷을 잡아야
+    // 이어하는 런에도 유효한 내성이 적용된다(로드된 tally 기준).
+    this.runResistance = deriveResistance(this.meta.enemyMemory.tally);
   },
 
   loadMeta() {

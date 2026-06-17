@@ -17,7 +17,8 @@ import {
   COMBAT_CSS,
   MOTION,
   WAVE,
-  waveParams
+  waveParams,
+  ENEMY_MEMORY_MAP
 } from '../constants/combat.js';
 import { PIXEL_FONT, BODY_FONT } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
@@ -198,13 +199,30 @@ export default class CombatScene extends Phaser.Scene {
   // 한 적에게 데미지 적용 + 데미지숫자 + 처치 처리. isPierce면 메카닉(감전) 트리거 제외.
   dealDamage(enemy, amount, isPierce = false) {
     if (!enemy || enemy.dead) return;
+
+    // ── R5 적기억 ── 무기 속성이 이 적의 학습 속성과 일치할 때만 개입.
+    // 핫패스 — 객체 할당 없이 맵 룩업 + 분기, 내성은 미리 만든 스냅샷 읽기만.
+    let resisted = false;
+    const wpnAttr = this.currentWeapon().attrTag;
+    if (wpnAttr && ENEMY_MEMORY_MAP[enemy.typeKey] === wpnAttr) {
+      const mult = GameState.runResistance?.[wpnAttr] ?? 1.0; // 런 고정 스냅샷
+      if (mult < 1.0) {
+        amount = amount * mult;
+        resisted = true;
+      }
+      // 다음 런용 누적(현재 런 스냅샷은 불변). 저장은 런 종료 시 1회.
+      const tally = GameState.meta.enemyMemory.tally;
+      tally[wpnAttr] = (tally[wpnAttr] || 0) + 1;
+    }
+
     const dmg = Math.max(1, Math.round(amount));
     const killed = enemy.takeDamage(dmg);
     this.spawnDamageNumber(
       enemy.container.x,
       enemy.container.y - enemy.displayHeight - 10,
       dmg,
-      isPierce ? COMBAT_CSS.pierce : COMBAT_CSS.damage
+      resisted ? COMBAT_CSS.resisted : isPierce ? COMBAT_CSS.pierce : COMBAT_CSS.damage,
+      resisted
     );
     // 감전 메카닉 — 관통타는 제외(스펙).
     if (!isPierce && !killed) {
@@ -378,6 +396,9 @@ export default class CombatScene extends Phaser.Scene {
     this.teardownEncounter();
     this.triggerDangerPulse(false);
     this.character.clearTint();
+    // R5 — 이번 런에서 누적된 적기억 tally를 즉시 영속(런 종료 1회, 핫패스 아님).
+    // 사망 화면에서 탭을 닫아도 다음 런 학습이 보존된다(startNewRun도 한 번 더 저장).
+    GameState.saveMeta();
     this.showDeathOverlay();
   }
 
@@ -1146,7 +1167,7 @@ export default class CombatScene extends Phaser.Scene {
   }
 
   // ── 데미지 숫자 팝업 ─────────────────────────────────────────────────
-  spawnDamageNumber(x, y, amount, color) {
+  spawnDamageNumber(x, y, amount, color, isResisted = false) {
     // 가로 흩뿌림: 같은 위치에 숫자가 겹치는 것 방지 + 레트로 튐 감성
     const driftX = Phaser.Math.Between(-MOTION.dmgDriftX, MOTION.dmgDriftX);
     const t = this.add
@@ -1161,13 +1182,30 @@ export default class CombatScene extends Phaser.Scene {
       .setDepth(70)
       .setScale(MOTION.dmgScaleFrom); // 팝 시작 스케일
 
+    // R5 내성 라벨 — 숫자 위 "RESIST"(8px, plain, stroke 없음). 숫자와 함께
+    // 상승·페이드·제거(트윈 onComplete에서 destroy)되어 누수 없음.
+    let label = null;
+    if (isResisted) {
+      label = this.add
+        .text(x + driftX, y - 18, 'RESIST', {
+          fontFamily: PIXEL_FONT,
+          fontSize: '8px',
+          color: COMBAT_CSS.resisted
+        })
+        .setOrigin(0.5)
+        .setDepth(70);
+    }
+
     if (!this.motionOk) {
       t.setScale(1);
-      this.time.delayedCall(400, () => t.destroy());
+      this.time.delayedCall(400, () => {
+        t.destroy();
+        label?.destroy();
+      });
       return;
     }
 
-    // 스케일 팝 — 임팩트 순간 크게 터졌다 정상으로
+    // 스케일 팝 — 임팩트 순간 크게 터졌다 정상으로 (숫자에만)
     this.tweens.add({
       targets: t,
       scale: 1,
@@ -1185,6 +1223,19 @@ export default class CombatScene extends Phaser.Scene {
       ease: 'Quad.out',
       onComplete: () => t.destroy()
     });
+
+    // RESIST 라벨 — 숫자와 같은 상승량으로 따라 올라가며 사라짐(상대 간격 유지).
+    if (label) {
+      this.tweens.add({
+        targets: label,
+        y: y - 18 - MOTION.dmgRiseY,
+        alpha: 0,
+        delay: MOTION.dmgFadeDelay,
+        duration: MOTION.dmgFadeMs,
+        ease: 'Quad.out',
+        onComplete: () => label.destroy()
+      });
+    }
   }
 
   // ── 비네트 + 위험 펄스 ──────────────────────────────────────────────
