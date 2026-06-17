@@ -61,6 +61,24 @@ Completed enemy PNGs:
 - `assets/ai-generated/backgrounds/parallax_l4_ground.png`
 - `assets/ai-generated/ui/truck_workbench_hub.png`
 
+Additional combat background variants:
+
+- `assets/ai-generated/backgrounds/variants/ruined_elevated_highway.png`
+- `assets/ai-generated/backgrounds/variants/abandoned_subway_platform.png`
+- `assets/ai-generated/backgrounds/variants/flooded_sewer_channel.png`
+- `assets/ai-generated/backgrounds/variants/ruined_factory_exterior.png`
+- `assets/ai-generated/backgrounds/variants/junkyard_maze.png`
+- `assets/ai-generated/backgrounds/variants/quarantine_checkpoint_ruins.png`
+- `assets/ai-generated/backgrounds/variants/abandoned_hospital_courtyard.png`
+- `assets/ai-generated/backgrounds/variants/rooftop_survivor_route.png`
+- `assets/ai-generated/backgrounds/variants/toxic_swamp_outskirts.png`
+- `assets/ai-generated/backgrounds/variants/abandoned_bus_depot.png`
+- `assets/ai-generated/backgrounds/variants/damaged_power_plant_interior.png`
+- `assets/ai-generated/backgrounds/variants/fallen_radio_tower_field.png`
+- `assets/ai-generated/backgrounds/variants/ruined_street_market.png`
+- `assets/ai-generated/backgrounds/variants/landfill_crater.png`
+- `assets/ai-generated/backgrounds/variants/underground_bunker_corridor.png`
+
 ### Individual weapon icons regenerated cleanly
 
 These were regenerated as individual isolated icons and should be safe to use:
