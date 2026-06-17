@@ -74,6 +74,15 @@ These were regenerated as individual isolated icons and should be safe to use:
 - `assets/ai-generated/weapons/individual/pipe_bomber.png`
 - `assets/ai-generated/weapons/individual/molotov.png`
 - `assets/ai-generated/weapons/individual/nailgun.png`
+- `assets/ai-generated/weapons/individual/poison_gas_canister.png`
+- `assets/ai-generated/weapons/individual/emp_railgun.png`
+- `assets/ai-generated/weapons/individual/bio_bomb.png`
+- `assets/ai-generated/weapons/individual/barbed_wire_trap.png`
+- `assets/ai-generated/weapons/individual/trash_can_turret.png`
+- `assets/ai-generated/weapons/individual/scrap_mortar.png`
+- `assets/ai-generated/weapons/individual/shock_cable.png`
+- `assets/ai-generated/weapons/individual/grappling_gun.png`
+- `assets/ai-generated/weapons/individual/gravity_disassembler.png`
 
 ### Individual UI and item icons
 
@@ -88,25 +97,50 @@ These are split into individual transparent PNGs:
 - `assets/ai-generated/items/individual/skill_point.png`
 - `assets/ai-generated/items/individual/notification_badge.png`
 
+### Crafting material icons
+
+These are individual transparent PNGs for weapon crafting recipes:
+
+- `assets/ai-generated/items/materials/plastic_bottle.png`
+- `assets/ai-generated/items/materials/cracked_glass_bottle.png`
+- `assets/ai-generated/items/materials/rusty_screws.png`
+- `assets/ai-generated/items/materials/bent_nails.png`
+- `assets/ai-generated/items/materials/bent_metal_pipe.png`
+- `assets/ai-generated/items/materials/copper_wire_coil.png`
+- `assets/ai-generated/items/materials/duct_tape_roll.png`
+- `assets/ai-generated/items/materials/old_battery_cell.png`
+- `assets/ai-generated/items/materials/scrap_metal_plate.png`
+- `assets/ai-generated/items/materials/broken_circuit_board.png`
+- `assets/ai-generated/items/materials/rubber_hose.png`
+- `assets/ai-generated/items/materials/crushed_tin_can.png`
+- `assets/ai-generated/items/materials/bottle_cap_bundle.png`
+- `assets/ai-generated/items/materials/glass_shards.png`
+- `assets/ai-generated/items/materials/spring_coil.png`
+- `assets/ai-generated/items/materials/gear_fragment.png`
+- `assets/ai-generated/items/materials/pressure_valve.png`
+- `assets/ai-generated/items/materials/empty_aerosol_can.png`
+- `assets/ai-generated/items/materials/torn_cloth_rag.png`
+- `assets/ai-generated/items/materials/leather_strap.png`
+- `assets/ai-generated/items/materials/spark_plug.png`
+- `assets/ai-generated/items/materials/small_electric_motor.png`
+- `assets/ai-generated/items/materials/magnet_pair.png`
+- `assets/ai-generated/items/materials/rusty_chain_links.png`
+- `assets/ai-generated/items/materials/broken_phone.png`
+- `assets/ai-generated/items/materials/flashlight_lens.png`
+- `assets/ai-generated/items/materials/small_fuel_canister.png`
+- `assets/ai-generated/items/materials/ceramic_insulator.png`
+- `assets/ai-generated/items/materials/bolt_bundle.png`
+- `assets/ai-generated/items/materials/chemical_vial.png`
+
 Some UI/item icons were split from an atlas. Visually inspect them before final use.
 
 ## Needs more work
 
-### Regenerate remaining weapon icons as individual images
+### Weapon icon regeneration complete
 
-The following files came from the atlas split and may have cropping or stray edge artifacts. Regenerate each one as a standalone isolated PNG before using in-game:
+All weapon icons listed above were regenerated as standalone isolated PNGs and should be safe to use in-game.
 
-- `assets/ai-generated/weapons/individual/poison_gas_canister.png`
-- `assets/ai-generated/weapons/individual/emp_railgun.png`
-- `assets/ai-generated/weapons/individual/bio_bomb.png`
-- `assets/ai-generated/weapons/individual/barbed_wire_trap.png`
-- `assets/ai-generated/weapons/individual/trash_can_turret.png`
-- `assets/ai-generated/weapons/individual/scrap_mortar.png`
-- `assets/ai-generated/weapons/individual/shock_cable.png`
-- `assets/ai-generated/weapons/individual/grappling_gun.png`
-- `assets/ai-generated/weapons/individual/gravity_disassembler.png`
-
-Recommended prompt pattern:
+Recommended prompt pattern for future weapon icons:
 
 ```text
 Create one isolated premium pixel-art game weapon icon for LAST SALVAGE: <weapon name>.
