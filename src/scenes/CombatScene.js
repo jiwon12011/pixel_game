@@ -15,13 +15,16 @@ import {
   SLICE_SPAWN_LIST,
   COMBAT_COLORS,
   COMBAT_CSS,
-  MOTION
+  MOTION,
+  WAVE,
+  waveParams
 } from '../constants/combat.js';
-import { PIXEL_FONT } from '../constants/fonts.js';
+import { PIXEL_FONT, BODY_FONT } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
 import GameState from '../state/GameState.js';
 import { rollDrop } from '../constants/drops.js';
-import { WEAPON_RECIPES, defenseMultiplier } from '../constants/crafting.js';
+import { WEAPON_RECIPES, STAT_UPGRADES, defenseMultiplier } from '../constants/crafting.js';
+import { legacyOptions } from '../constants/meta.js';
 
 // 전투 뷰(상단 58%): 4레이어 패럴랙스 + 주인공 + 자동 진행 전투.
 // 적 스폰/이동/공격 타이밍은 CombatDirector가, 적 단위 연출은 Enemy가 담당.
@@ -56,6 +59,7 @@ export default class CombatScene extends Phaser.Scene {
     this.createCharacter();
     this.createVignette();
     this.createHud();
+    this.createWaveHud();
     this.createResourceHud();
     this.createToast();
 
@@ -110,6 +114,7 @@ export default class CombatScene extends Phaser.Scene {
       groundY: this.groundY,
       depth: this.parallax.topDepth + 1,
       motionOk: this.motionOk,
+      getWaveParams: () => waveParams(GameState.waveIndex),
       player: {
         getX: () => this.playerX,
         getAttackCooldown: () => this.currentWeapon().cooldown,
@@ -119,6 +124,24 @@ export default class CombatScene extends Phaser.Scene {
     });
     this.director.start();
     this.combatReady = true;
+    this.refreshWaveHud();
+  }
+
+  // 진행 중인 전투를 깔끔히 내린다 — 적/트윈/타이머 누수 없이(재시작/사망 공용).
+  teardownEncounter() {
+    this.combatReady = false;
+    this.director?.stop();
+    this.director?.clearAll(); // Enemy.destroy가 트윈·컨테이너까지 정리
+    this.director = null;
+    this.hitStopUntil = 0;
+
+    // 주인공 트윈 정리 — 사망이 playerAttack 런지 중간에 나면 3단계 체인/onComplete
+    // (idleBobTween.resume 등)이 teardown 후에도 발화해 새 런 bob 상태가 꼬인다.
+    // idle bob도 character/shadow 대상이라 함께 죽으므로 restartRun에서 startIdleBob으로 재생성.
+    this.tweens.killTweensOf(this.character);
+    this.tweens.killTweensOf(this.shadow);
+    this.idleBobTween = null;
+    this.shadowBobTween = null;
   }
 
   // ── 주인공 ──────────────────────────────────────────────────────────
@@ -145,26 +168,31 @@ export default class CombatScene extends Phaser.Scene {
       .setScale(this.charScale)
       .setDepth(this.parallax.topDepth + 1);
 
-    if (this.motionOk) {
-      // idle bob 저장 — 공격 시 pause/resume해 x/scale 트윈과 간섭 방지
-      this.idleBobTween = this.tweens.add({
-        targets: this.character,
-        y: this.groundY - 4,
-        duration: 1100,
-        ease: 'Sine.inOut',
-        yoyo: true,
-        repeat: -1
-      });
-      this.tweens.add({
-        targets: this.shadow,
-        scaleX: 0.92,
-        alpha: 0.28,
-        duration: 1100,
-        ease: 'Sine.inOut',
-        yoyo: true,
-        repeat: -1
-      });
-    }
+    this.startIdleBob();
+  }
+
+  // idle bob(주인공 + 그림자) 생성. teardown이 character/shadow 트윈을 통째로 killTweensOf
+  // 하므로 새 런 시작 시 여기서 재생성해야 bob이 되살아난다(idleBobTween 상태 정상화).
+  startIdleBob() {
+    if (!this.motionOk) return;
+    // idle bob 저장 — 공격 시 pause/resume해 x/scale 트윈과 간섭 방지
+    this.idleBobTween = this.tweens.add({
+      targets: this.character,
+      y: this.groundY - 4,
+      duration: 1100,
+      ease: 'Sine.inOut',
+      yoyo: true,
+      repeat: -1
+    });
+    this.shadowBobTween = this.tweens.add({
+      targets: this.shadow,
+      scaleX: 0.92,
+      alpha: 0.28,
+      duration: 1100,
+      ease: 'Sine.inOut',
+      yoyo: true,
+      repeat: -1
+    });
   }
 
   // 한 적에게 데미지 적용 + 데미지숫자 + 처치 처리. isPierce면 메카닉(감전) 트리거 제외.
@@ -255,9 +283,22 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
-  // 적 처치 → 드롭 롤 → GameState 가산(+토스트/체인지 이벤트) → 줍기 연출.
+  // 적 처치 → 웨이브 진행 → 드롭 롤(웨이브 배율) → GameState 가산 → 줍기 연출.
   onEnemyKilled(enemy) {
+    // 1) 처치 누적 → 웨이브 진행. 넘어가면 HUD 갱신 + 배너.
+    const { waveChanged, waveIndex } = GameState.addKill();
+    this.refreshWaveHud();
+    if (waveChanged) this.showWaveBanner(waveIndex);
+
+    // 2) 드롭 — 코인은 round, 파츠는 floor로 dropMult 반영(희귀 파츠 과인플레 방지).
     const drop = rollDrop(enemy.typeKey);
+    const mult = waveParams(GameState.waveIndex).dropMult;
+    if (mult !== 1) {
+      drop.coins = Math.round(drop.coins * mult);
+      drop.SCRAP = Math.floor(drop.SCRAP * mult);
+      drop.ELEC = Math.floor(drop.ELEC * mult);
+      drop.POWDER = Math.floor(drop.POWDER * mult);
+    }
     const hasAny = drop.coins || drop.SCRAP || drop.ELEC || drop.POWDER;
     if (!hasAny) return;
     const x = enemy.container.x;
@@ -283,7 +324,7 @@ export default class CombatScene extends Phaser.Scene {
     const ratio = this.playerHP / this.maxHP;
     this.triggerDangerPulse(ratio <= PLAYER.dangerThreshold && this.playerHP > 0, ratio);
 
-    if (this.playerHP <= 0) this.onPlayerDeath();
+    if (this.playerHP <= 0) this._triggerDeathFlash(() => this.onPlayerDeath());
   }
 
   // [모션 훅] 피격 플래시 — tint 후 타이머 clearTint (텍스처 스왑 금지).
@@ -300,30 +341,494 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
-  // 주인공 사망 — placeholder. 일단 잠시 후 HP 리셋 + 적 청소(로그라이크 런 구조는 다음 단계).
-  onPlayerDeath() {
-    this.director?.stop();
-    this.director?.clearAll();
-    this.triggerDangerPulse(false);
-
-    const banner = this.add
-      .text(LOGICAL.width / 2, COMBAT_H * 0.42, '런 종료 — 재구성 중…', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '13px',
-        color: '#ff6020'
-      })
-      .setOrigin(0.5)
+  // [모션 훅] 사망 확정 순간 붉은 화면 플래시 — "당했다" 강조. 과하지 않게 짧고 강하게.
+  // reduced-motion 시 즉시 after() 호출.
+  _triggerDeathFlash(after) {
+    if (!this.motionOk) {
+      after();
+      return;
+    }
+    const flash = this.add
+      .rectangle(0, 0, LOGICAL.width, COMBAT_H, 0xcc1800, 0)
+      .setOrigin(0, 0)
       .setDepth(80);
 
-    this.time.delayedCall(1400, () => {
-      banner.destroy();
-      // 사망 후 리셋 시점의 최신 maxHP로 풀피 복구(그동안 업그레이드했을 수 있음).
-      this.maxHP = GameState.stats.maxHP;
-      this.playerHP = this.maxHP;
-      this.updateHpBar();
-      this.character.clearTint();
-      this.director?.start();
+    this.tweens.add({
+      targets: flash,
+      alpha: MOTION.deathFlashAlpha,
+      duration: MOTION.deathFlashMs,
+      ease: 'Quad.out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: flash,
+          alpha: 0,
+          duration: MOTION.deathFlashOutMs,
+          ease: 'Quad.in',
+          onComplete: () => {
+            flash.destroy();
+            after();
+          }
+        });
+      }
     });
+  }
+
+  // 주인공 사망 → 런 종료. 전투를 내리고 사망 오버레이(요약 + 유산 선택)를 띄운다.
+  onPlayerDeath() {
+    this.teardownEncounter();
+    this.triggerDangerPulse(false);
+    this.character.clearTint();
+    this.showDeathOverlay();
+  }
+
+  // ── 사망 오버레이: 런 요약 + 유산 4선택 + "들고 시작" ───────────────────
+  // [모션 훅] showDeathOverlay / hideDeathOverlay / playRunResetTransition —
+  //           전환 정교화는 motion-engineer가 이 훅 위에 얹는다.
+  showDeathOverlay() {
+    const W = LOGICAL.width;
+    const H = COMBAT_H;
+    this.selectedLegacy = null;
+
+    const layer = this.add.container(0, 0).setDepth(90);
+    this.deathLayer = layer;
+
+    // ── 풀커버 암막 ────────────────────────────────────────────────────
+    const scrim = this.add.rectangle(0, 0, W, H, 0x0a0805, 0.88).setOrigin(0, 0);
+    layer.add(scrim);
+
+    // ── 타이틀 ─────────────────────────────────────────────────────────
+    const titleText = this.add
+      .text(W / 2, 70, '런 종료', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '22px',
+        color: '#ff6020',
+        stroke: '#3a1000',
+        strokeThickness: 4
+      })
+      .setOrigin(0.5);
+    layer.add(titleText);
+
+    // ── 런 요약 — 도달 웨이브 / 처치 수 / 모은 코인 ─────────────────────
+    const summaryLines = [
+      `도달 웨이브  ${GameState.waveIndex}`,
+      `처치  ${GameState.runKills}`,
+      `모은 코인  ${GameState.coins}`
+    ];
+    const summaryTexts = summaryLines.map((line, i) => {
+      const t = this.add
+        .text(W / 2, 104 + i * 16, line, {
+          fontFamily: PIXEL_FONT,
+          fontSize: '11px',
+          color: '#cbb89a'
+        })
+        .setOrigin(0.5);
+      layer.add(t);
+      return t;
+    });
+
+    const subtitleText = this.add
+      .text(W / 2, 162, '유산 1개를 들고 새 런 시작', {
+        fontFamily: BODY_FONT,
+        fontSize: '10px',
+        color: '#9a8b78'
+      })
+      .setOrigin(0.5);
+    layer.add(subtitleText);
+
+    // ── 유산 카드 2×2 (buildLegacyCard 내부에서 container 생성) ─────────
+    const opts = legacyOptions(GameState);
+    this.legacyCards = [];
+    const slotW = 86;
+    const slotH = 46;
+    const gapX = 16;
+    const gapY = 14;
+    const gridW = slotW * 2 + gapX;
+    const startX = (W - gridW) / 2;
+    const startY = 178;
+
+    opts.forEach((opt, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const cx = startX + col * (slotW + gapX) + slotW / 2;
+      const cy = startY + row * (slotH + gapY) + slotH / 2;
+      this.legacyCards.push(this.buildLegacyCard(layer, opt, cx, cy, slotW, slotH));
+    });
+
+    const anyEnabled = opts.some((o) => o.enabled);
+
+    // ── 확정 버튼 ──────────────────────────────────────────────────────
+    const btnBg = this.add
+      .rectangle(W / 2, 322, 132, 30, 0xff6020)
+      .setStrokeStyle(1, 0x000000, 0.45);
+    const btnLabel = this.add
+      .text(W / 2, 322, anyEnabled ? '들고 시작' : '새 런 시작', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '12px',
+        color: '#1a1008'
+      })
+      .setOrigin(0.5);
+    layer.add(btnBg);
+    layer.add(btnLabel);
+    this.confirmBtn = { bg: btnBg, label: btnLabel };
+
+    btnBg.setInteractive({ useHandCursor: true }).on('pointerdown', () => {
+      if (!btnBg.getData('enabled')) return;
+      this.confirmLegacy();
+    });
+
+    // 첫 런(유산 없음) 또는 들고 갈 게 전혀 없으면 → 즉시 활성.
+    this.setConfirmEnabled(!anyEnabled);
+
+    // ── 연출 분기 ──────────────────────────────────────────────────────
+    if (!this.motionOk) {
+      // reduced-motion: 즉시 전체 표시, 상태 변경 없음
+      return;
+    }
+
+    // motionOk: 각 요소를 개별 숨김 → 순차 트윈 등장
+    // (layer 자체는 항상 visible — 자식을 개별 제어)
+    const origSummaryY = summaryTexts.map((t) => t.y);
+    const origSubtitleY = subtitleText.y;
+    const origCardY = this.legacyCards.map((c) => c.cardContainer.y);
+
+    scrim.setAlpha(0);
+    titleText.setAlpha(0).setScale(0.55);
+    summaryTexts.forEach((t, i) => t.setAlpha(0).setY(origSummaryY[i] + 8));
+    subtitleText.setAlpha(0).setY(origSubtitleY + 6);
+    this.legacyCards.forEach((c, i) =>
+      c.cardContainer.setAlpha(0).setY(origCardY[i] + MOTION.deathCardSlideY)
+    );
+    btnBg.setAlpha(0);
+    btnLabel.setAlpha(0);
+
+    // 1. 암막 페이드인 (600ms)
+    this.tweens.add({
+      targets: scrim,
+      alpha: 0.88,
+      duration: MOTION.deathScrimMs,
+      ease: 'Quad.out'
+    });
+
+    // 2. 타이틀 스케일인 + 주황 글로우 흔들림
+    this.time.delayedCall(MOTION.deathTitleDelay, () => {
+      if (!this.deathLayer) return;
+      this.tweens.add({
+        targets: titleText,
+        alpha: 1,
+        scale: 1,
+        duration: MOTION.deathTitleInMs,
+        ease: 'Back.out',
+        onComplete: () => {
+          if (!titleText.active) return;
+          // 계단식 4단계 흔들림 — 레트로 임팩트
+          const amp = MOTION.deathTitleShakeAmp;
+          [amp, -amp * 0.55, amp * 0.28, 0].forEach((dx, idx) => {
+            this.time.delayedCall(idx * 55, () => {
+              if (titleText.active) titleText.x = W / 2 + dx;
+            });
+          });
+        }
+      });
+    });
+
+    // 3. 요약 항목 슬라이드인 (스태거)
+    summaryTexts.forEach((t, i) => {
+      this.time.delayedCall(
+        MOTION.deathSummaryDelay + i * MOTION.deathSummaryStagger,
+        () => {
+          if (!this.deathLayer || !t.active) return;
+          this.tweens.add({
+            targets: t,
+            alpha: 1,
+            y: origSummaryY[i],
+            duration: 150,
+            ease: 'Quad.out'
+          });
+        }
+      );
+    });
+
+    // subtitle
+    this.time.delayedCall(
+      MOTION.deathSummaryDelay + summaryTexts.length * MOTION.deathSummaryStagger,
+      () => {
+        if (!this.deathLayer || !subtitleText.active) return;
+        this.tweens.add({
+          targets: subtitleText,
+          alpha: 1,
+          y: origSubtitleY,
+          duration: 150,
+          ease: 'Quad.out'
+        });
+      }
+    );
+
+    // 4. 유산 카드 스태거 (아래서 올라오며 등장)
+    this.legacyCards.forEach((c, i) => {
+      this.time.delayedCall(
+        MOTION.deathCardDelay + i * MOTION.deathCardStagger,
+        () => {
+          if (!this.deathLayer || !c.cardContainer.active) return;
+          this.tweens.add({
+            targets: c.cardContainer,
+            alpha: 1,
+            y: origCardY[i],
+            duration: 180,
+            ease: 'Quad.out'
+          });
+        }
+      );
+    });
+
+    // 5. 확정 버튼 (카드 완료 후)
+    const btnDelay =
+      MOTION.deathCardDelay + this.legacyCards.length * MOTION.deathCardStagger + 60;
+    this.time.delayedCall(btnDelay, () => {
+      if (!this.deathLayer) return;
+      this.tweens.add({
+        targets: [btnBg, btnLabel],
+        alpha: 1,
+        duration: 180,
+        ease: 'Quad.out'
+      });
+    });
+  }
+
+  buildLegacyCard(layer, opt, cx, cy, w, h) {
+    const enabled = opt.enabled;
+
+    // container로 묶어 hover/select 트윈을 한 번에 적용
+    const cardContainer = this.add.container(cx, cy);
+    cardContainer.setSize(w, h);
+
+    const bg = this.add
+      .rectangle(0, 0, w, h, enabled ? 0x1c1712 : 0x141210, 1)
+      .setStrokeStyle(2, enabled ? 0x3d2b1a : 0x241c14, 1);
+    const title = this.add
+      .text(0, -12, this.legacyTitle(opt), {
+        fontFamily: PIXEL_FONT,
+        fontSize: '11px',
+        color: enabled ? '#f0c040' : '#5a4f3e'
+      })
+      .setOrigin(0.5);
+    const detail = this.add
+      .text(0, 8, this.legacyDetail(opt), {
+        fontFamily: BODY_FONT,
+        fontSize: '9px',
+        color: enabled ? '#cbb89a' : '#4f463a',
+        align: 'center'
+      })
+      .setOrigin(0.5);
+    detail.setShadow(1, 1, '#000000', 0, false, true);
+
+    cardContainer.add([bg, title, detail]);
+    layer.add(cardContainer);
+
+    const card = { opt, bg, cardContainer, enabled };
+
+    if (enabled) {
+      // interactive는 container에 걸어 hover/select를 한 번에 처리
+      cardContainer
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', () => this.selectLegacy(card));
+
+      if (this.motionOk) {
+        cardContainer
+          .on('pointerover', () => {
+            this.tweens.add({
+              targets: cardContainer,
+              scaleX: MOTION.legacyHoverScale,
+              scaleY: MOTION.legacyHoverScale,
+              duration: 100,
+              ease: 'Quad.out'
+            });
+          })
+          .on('pointerout', () => {
+            this.tweens.add({
+              targets: cardContainer,
+              scaleX: 1,
+              scaleY: 1,
+              duration: 120,
+              ease: 'Quad.in'
+            });
+          });
+      }
+    }
+    return card;
+  }
+
+  legacyTitle(opt) {
+    switch (opt.type) {
+      case 'weapon':
+        return '무기';
+      case 'parts':
+        return '파츠';
+      case 'coins':
+        return '코인';
+      case 'stat':
+        return '스탯';
+      default:
+        return '';
+    }
+  }
+
+  legacyDetail(opt) {
+    switch (opt.type) {
+      case 'weapon':
+        return opt.enabled ? (WEAPON_RECIPES[opt.weapon]?.name || opt.weapon) : '기본 무기뿐';
+      case 'parts': {
+        if (!opt.enabled) return '보유 없음';
+        const p = opt.parts;
+        const bits = [];
+        if (p.SCRAP) bits.push(`S+${p.SCRAP}`);
+        if (p.ELEC) bits.push(`E+${p.ELEC}`);
+        if (p.POWDER) bits.push(`P+${p.POWDER}`);
+        return bits.join(' ');
+      }
+      case 'coins':
+        return opt.enabled ? `+${opt.coins} 코인` : '보유 없음';
+      case 'stat':
+        return opt.enabled ? `${STAT_UPGRADES[opt.stat]?.label || opt.stat} Lv1` : '투자 없음';
+      default:
+        return '';
+    }
+  }
+
+  selectLegacy(card) {
+    this.selectedLegacy = card.opt;
+    // 금 테두리 강조 + 나머지 기본 테두리 복귀
+    this.legacyCards.forEach((c) => {
+      if (!c.enabled) return;
+      c.bg.setStrokeStyle(2, c === card ? 0xf0c040 : 0x3d2b1a, 1);
+    });
+    // 선택 카드 펄스 (scale 1 → 1.06 → 1, yoyo×repeat×2 ≈ 400ms)
+    if (this.motionOk && card.cardContainer.active) {
+      this.tweens.killTweensOf(card.cardContainer);
+      this.tweens.add({
+        targets: card.cardContainer,
+        scaleX: 1.06,
+        scaleY: 1.06,
+        duration: MOTION.legacyPulseMs,
+        ease: 'Quad.out',
+        yoyo: true,
+        repeat: 1,
+        onComplete: () => {
+          if (card.cardContainer.active) card.cardContainer.setScale(1);
+        }
+      });
+    }
+    this.setConfirmEnabled(true);
+  }
+
+  setConfirmEnabled(on) {
+    const { bg, label } = this.confirmBtn;
+    bg.setData('enabled', on);
+    bg.setFillStyle(on ? 0xff6020 : 0x2a2a2a);
+    label.setColor(on ? '#1a1008' : '#6a5a50');
+
+    // 기존 펄스 트윈 정리 후 재설정
+    if (this._confirmPulseTween) {
+      this._confirmPulseTween.stop();
+      this._confirmPulseTween = null;
+    }
+    bg.setAlpha(1);
+
+    if (on && this.motionOk) {
+      // 활성화 시 alpha 반복 펄스 — 주목 유도, 선택 대기감
+      this._confirmPulseTween = this.tweens.add({
+        targets: bg,
+        alpha: 0.72,
+        duration: MOTION.confirmPulseMs,
+        ease: 'Sine.inOut',
+        yoyo: true,
+        repeat: -1
+      });
+    }
+  }
+
+  confirmLegacy() {
+    // 선택된 옵션 → 유산 payload(없으면 빈손).
+    const opt = this.selectedLegacy;
+    let legacy = null;
+    if (opt) {
+      if (opt.type === 'weapon') legacy = { type: 'weapon', weapon: opt.weapon };
+      else if (opt.type === 'parts') legacy = { type: 'parts', parts: opt.parts };
+      else if (opt.type === 'coins') legacy = { type: 'coins', coins: opt.coins };
+      else if (opt.type === 'stat') legacy = { type: 'stat', stat: opt.stat };
+    }
+    GameState.setLegacy(legacy); // meta.legacy 저장
+    GameState.startNewRun(); // 유산 소비 + run 리셋 + runCount++
+    this.playRunResetTransition(() => this.restartRun());
+  }
+
+  // [모션 훅] 확정 후 오렌지 플래시 → 전투뷰 복귀. 짧고 경쾌한 런 리셋 전환.
+  // 오렌지 플래시 정점에서 deathLayer를 즉시 숨기고 after()로 전투 복귀 준비 →
+  // 암막색 rect가 페이드아웃되며 전투뷰가 자연스럽게 드러남.
+  playRunResetTransition(after) {
+    if (!this.motionOk || !this.deathLayer) {
+      after();
+      return;
+    }
+
+    // 확정 버튼 펄스 먼저 정리
+    if (this._confirmPulseTween) {
+      this._confirmPulseTween.stop();
+      this._confirmPulseTween = null;
+      this.confirmBtn?.bg.setAlpha(1);
+    }
+
+    const W = LOGICAL.width;
+    const H = COMBAT_H;
+    // deathLayer(depth 90) 위에 플래시 레이어
+    const flash = this.add
+      .rectangle(0, 0, W, H, 0xff7010, 0)
+      .setOrigin(0, 0)
+      .setDepth(95);
+
+    // 1단계: 오렌지 플래시 인
+    this.tweens.add({
+      targets: flash,
+      alpha: 0.82,
+      duration: MOTION.resetFlashMs,
+      ease: 'Quad.out',
+      onComplete: () => {
+        // 플래시 정점: deathLayer 즉시 숨김 + 전투 복귀 콜백
+        if (this.deathLayer) this.deathLayer.setAlpha(0);
+        after();
+        // 2단계: 암막색으로 교체 후 페이드아웃 → 전투뷰 서서히 드러남
+        flash.setFillStyle(0x0a0805);
+        this.tweens.add({
+          targets: flash,
+          alpha: 0,
+          duration: MOTION.resetFadeInMs,
+          ease: 'Quad.out',
+          onComplete: () => flash.destroy()
+        });
+      }
+    });
+  }
+
+  hideDeathOverlay() {
+    this.deathLayer?.destroy();
+    this.deathLayer = null;
+    this.legacyCards = null;
+    this.confirmBtn = null;
+    this.selectedLegacy = null;
+  }
+
+  // 새 런으로 전투 재시작 — HP 풀피, 웨이브/자원 HUD 갱신, 새 director.
+  restartRun() {
+    this.hideDeathOverlay();
+    this.maxHP = GameState.stats.maxHP;
+    this.playerHP = this.maxHP;
+    this.updateHpBar();
+    this.character.clearTint();
+    // teardown이 런지/idle 트윈을 죽여 x/y/scale이 중간값으로 멈췄을 수 있으니 기준값 복원
+    this.character.setPosition(this.playerX, this.groundY).setScale(this.charScale);
+    this.shadow.setScale(1).setAlpha(0.35); // 그림자 bob 기준값 복원
+    this.startIdleBob(); // bob 재생성 — 이후 playerAttack의 pause/resume가 정상 동작
+    this.syncResourceHud();
+    this.startEncounter(); // 새 director 구성 + refreshWaveHud
   }
 
   // ── HUD: 주인공 HP바 (전투뷰 상단) ──────────────────────────────────
@@ -363,6 +868,86 @@ export default class CombatScene extends Phaser.Scene {
     // 위험 구간이면 바 색도 주황으로
     this.hpFill.fillColor =
       ratio <= PLAYER.dangerThreshold ? COMBAT_COLORS.electric : COMBAT_COLORS.gold;
+  }
+
+  // ── 웨이브 HUD (HP바/라벨 아래, 좌상단) ──────────────────────────────
+  createWaveHud() {
+    const x = 10;
+    this.waveText = this.add
+      .text(x, 34, 'WAVE 0', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '9px',
+        color: '#ff6020'
+      })
+      .setOrigin(0, 0)
+      .setDepth(61);
+    this.waveText.setShadow(1, 1, '#000000', 0, false, true);
+
+    const barY = 46;
+    this.waveBarW = 64;
+    this.add
+      .rectangle(x, barY, this.waveBarW + 2, 5, 0x000000, 0.55)
+      .setOrigin(0, 0)
+      .setDepth(60);
+    this.waveBarTrack = this.add
+      .rectangle(x + 1, barY + 1, this.waveBarW, 3, PALETTE.hubSecondary)
+      .setOrigin(0, 0)
+      .setDepth(60);
+    this.waveBarFill = this.add
+      .rectangle(x + 1, barY + 1, 0, 3, COMBAT_COLORS.toxic)
+      .setOrigin(0, 0)
+      .setDepth(61);
+
+    this.refreshWaveHud();
+  }
+
+  refreshWaveHud() {
+    if (!this.waveText) return;
+    this.waveText.setText(`WAVE ${GameState.waveIndex}`);
+    const inWave = GameState.runKills % WAVE.killsPerWave;
+    this.waveBarFill.width = this.waveBarW * (inWave / WAVE.killsPerWave);
+  }
+
+  // [모션 훅] 웨이브 진입 배너 — 스케일인 → 유지 → 스케일업+페이드. 전투 흐름 최소 간섭.
+  showWaveBanner(n) {
+    const t = this.add
+      .text(LOGICAL.width / 2, COMBAT_H * 0.3, `WAVE ${n}`, {
+        fontFamily: PIXEL_FONT,
+        fontSize: '20px',
+        color: '#ff6020',
+        stroke: '#1a1008',
+        strokeThickness: 4
+      })
+      .setOrigin(0.5)
+      .setDepth(75);
+
+    if (!this.motionOk) {
+      this.time.delayedCall(700, () => t.destroy());
+      return;
+    }
+
+    t.setScale(0.6).setAlpha(0);
+    this.tweens.add({
+      targets: t,
+      scale: 1,
+      alpha: 1,
+      duration: MOTION.waveBannerInMs,
+      ease: 'Back.out',
+      onComplete: () => {
+        this.time.delayedCall(MOTION.waveBannerStayMs, () => {
+          if (!t.active) return;
+          // 아웃: 스케일 업 + 페이드 — 터지듯 사라져 전투에 다시 집중
+          this.tweens.add({
+            targets: t,
+            scale: 1.22,
+            alpha: 0,
+            duration: MOTION.waveBannerOutMs,
+            ease: 'Quad.in',
+            onComplete: () => t.destroy()
+          });
+        });
+      }
+    });
   }
 
   // ── 자원 HUD (전투뷰 우상단): 코인/스크랩/ELEC/POWDER 카운터 ──────────

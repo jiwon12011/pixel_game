@@ -11,19 +11,21 @@ export default class Enemy {
    * @param {Phaser.Scene} scene
    * @param {object} cfg { typeKey, x, groundY, depth, motionOk, onDeath }
    */
-  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath }) {
+  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath, hpMult = 1 }) {
     this.scene = scene;
     this.typeKey = typeKey;
     this.def = ENEMY_TYPES[typeKey];
     this.motionOk = motionOk;
     this.onDeath = onDeath;
 
-    this.maxHP = this.def.maxHP;
-    this.hp = this.def.maxHP;
+    // 웨이브 에스컬레이션 — 최대 HP만 배율(데미지/속도는 그대로 둬 체감 난이도 통제).
+    this.maxHP = Math.max(1, Math.round(this.def.maxHP * hpMult));
+    this.hp = this.maxHP;
     this.speed = this.def.speed;
 
     this.dead = false; // HP 0 → 사망 연출 진행 중
     this.removed = false; // 연출 끝 → 풀에서 제거 대상
+    this._timers = []; // flashHit 등이 만든 delayedCall TimerEvent — teardown 시 일괄 정리
     this.inRange = false; // 주인공 접근 사거리 진입
     this.attackTimer = this.def.attackCooldown; // 첫 접촉 직후 바로 안 때리게 풀쿨로 시작
 
@@ -164,24 +166,31 @@ export default class Enemy {
   // 셰이크: shakeX 계단식 감쇠 오실레이션 + shakeY 짧은 반동.
   flashHit() {
     // 임팩트 순간 흰색 플래시, 이후 붉은 잔상, 마지막 클리어
+    // (모든 delayedCall 반환값을 _timers에 저장 → destroy/die에서 유령 타이머 정리)
     this.sprite.setTint(0xffffff);
-    this.scene.time.delayedCall(45, () => {
-      if (!this.dead) this.sprite.setTint(COMBAT_COLORS.hitTint);
-    });
-    this.scene.time.delayedCall(155, () => {
-      if (!this.dead) this.restoreTint(); // 감전 중이면 청록 유지, 아니면 클리어
-    });
+    this._timers.push(
+      this.scene.time.delayedCall(45, () => {
+        if (!this.dead) this.sprite.setTint(COMBAT_COLORS.hitTint);
+      })
+    );
+    this._timers.push(
+      this.scene.time.delayedCall(155, () => {
+        if (!this.dead) this.restoreTint(); // 감전 중이면 청록 유지, 아니면 클리어
+      })
+    );
 
     if (!this.motionOk) return;
 
     // 계단식 감쇠 오실레이션 shakeX — 각 step마다 즉시 적용해 레트로 계단 감성
     MOTION.shakeOffsets.forEach((offset, i) => {
-      this.scene.time.delayedCall(i * MOTION.shakeStepMs, () => {
-        if (!this.dead) {
-          this.shakeX = offset;
-          this.syncPosition();
-        }
-      });
+      this._timers.push(
+        this.scene.time.delayedCall(i * MOTION.shakeStepMs, () => {
+          if (!this.dead) {
+            this.shakeX = offset;
+            this.syncPosition();
+          }
+        })
+      );
     });
 
     // shakeY 위로 살짝 튕겼다 복귀
@@ -213,6 +222,7 @@ export default class Enemy {
   die() {
     if (this.dead) return;
     this.dead = true;
+    this._clearTimers(); // 대기 중인 flashHit 타이머 정리(이미 dead 가드라 무해하지만 유령 제거)
     this.hpBg.setVisible(false);
     this.hpFill.setVisible(false);
     this.sprite.clearTint();
@@ -260,9 +270,21 @@ export default class Enemy {
     });
   }
 
+  // 대기 중인 delayedCall TimerEvent를 TimeManager에서 제거(remove(false): 콜백 미실행).
+  // 완료된 타이머 remove는 무해. die()와 destroy() 양쪽에서 호출해 유령 타이머 0 보장.
+  _clearTimers() {
+    for (const t of this._timers) t.remove(false);
+    this._timers.length = 0;
+  }
+
   destroy() {
+    // dead=true로 둬서 비동기 delayedCall(flashHit/restoreTint)이 파괴된 sprite를 건드리지 않게.
+    this.dead = true;
+    this._clearTimers();
     this.bobTween?.stop();
+    this.scene.tweens.killTweensOf(this);
     if (this.container && !this.removed) {
+      this.scene.tweens.killTweensOf(this.container);
       this.removed = true;
       this.container.destroy();
     }

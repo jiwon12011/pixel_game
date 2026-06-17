@@ -34,6 +34,7 @@ export function defenseMultiplier(def) {
 //   mechanic  — 전투 특수효과(없으면 null)
 //     · shock : 히트 시 chance 확률로 대상 감전 → speed*slowMult, attackCooldown*cdMult, durationMs
 //     · pierce: 사거리 내 2번째 적에게 falloff 배율 추가타(관통타는 메카닉 트리거 제외)
+//   attrTag   — 무기 속성 태그(R5 적기억 tally 키). R4선 미사용, 분류만.
 export const WEAPON_RECIPES = {
   pipe_wrench: {
     id: 'pipe_wrench',
@@ -44,6 +45,7 @@ export const WEAPON_RECIPES = {
     requires: null,
     cost: {},
     mechanic: null,
+    attrTag: 'PHYSICAL',
     ability: '균형 잡힌 기본 근접'
   },
   electric_shock_wrench: {
@@ -55,6 +57,7 @@ export const WEAPON_RECIPES = {
     requires: 'pipe_wrench',
     cost: { SCRAP: 8, ELEC: 3 },
     mechanic: { type: 'shock', chance: 0.3, slowMult: 0.5, cdMult: 1.67, durationMs: 600 },
+    attrTag: 'SHOCK',
     ability: '히트 30% 감전(감속)'
   },
   plasma_shredder: {
@@ -66,6 +69,7 @@ export const WEAPON_RECIPES = {
     requires: 'electric_shock_wrench',
     cost: { SCRAP: 15, ELEC: 6 },
     mechanic: { type: 'pierce', falloff: 0.5 },
+    attrTag: 'PIERCE',
     ability: '2번째 적 관통 ×0.5'
   }
 };

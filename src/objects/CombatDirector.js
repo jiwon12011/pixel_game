@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import Enemy from './Enemy.js';
 import { LOGICAL } from '../constants/layout.js';
-import { PLAYER, SPAWN } from '../constants/combat.js';
+import { PLAYER, SPAWN, waveParams } from '../constants/combat.js';
 
 // 전투 운영자 — 자동 진행 사이드스크롤 전투의 두뇌.
 //   · 웨이브 스폰(우측 밖 → 좌측 접근)
@@ -30,6 +30,8 @@ export default class CombatDirector {
     this.depth = cfg.depth;
     this.motionOk = cfg.motionOk;
     this.player = cfg.player;
+    // 현재 웨이브 파라미터 공급원(스폰 간격/동시상한/HP·드롭 배율). 없으면 웨이브0 고정.
+    this.getWaveParams = cfg.getWaveParams || (() => waveParams(0));
 
     this.enemies = [];
     this.running = false;
@@ -64,6 +66,7 @@ export default class CombatDirector {
       groundY: this.groundY,
       depth: this.depth,
       motionOk: this.motionOk,
+      hpMult: this.getWaveParams().hpMult, // 웨이브가 깊을수록 더 단단하게
       onDeath: () => {
         // 사망 → 다음 스폰을 살짝 앞당겨 텀이 비지 않게
         this.nextSpawnIn = Math.min(this.nextSpawnIn, SPAWN.respawnDelay);
@@ -74,7 +77,8 @@ export default class CombatDirector {
   }
 
   scheduleNextSpawn() {
-    this.nextSpawnIn = Phaser.Math.Between(SPAWN.intervalMin, SPAWN.intervalMax);
+    const p = this.getWaveParams();
+    this.nextSpawnIn = Phaser.Math.Between(p.intervalMin, p.intervalMax);
     this.spawnAccum = 0;
   }
 
@@ -84,9 +88,9 @@ export default class CombatDirector {
     const dt = dtMs / 1000;
     const px = this.player.getX();
 
-    // 스폰 타이밍
+    // 스폰 타이밍 — 동시 생존 상한은 현재 웨이브가 결정
     this.spawnAccum += dtMs;
-    if (this.spawnAccum >= this.nextSpawnIn && this.aliveCount() < SPAWN.maxAlive) {
+    if (this.spawnAccum >= this.nextSpawnIn && this.aliveCount() < this.getWaveParams().maxAlive) {
       this.spawn();
       this.scheduleNextSpawn();
     }

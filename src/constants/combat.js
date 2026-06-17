@@ -41,14 +41,46 @@ export const ENEMY_TYPES = {
   }
 };
 
-// 스폰 운영
+// 스폰 운영 — interval/maxAlive는 이제 웨이브(waveParams)가 결정한다.
+// 여기 남은 값은 웨이브와 무관한 스폰장 규칙 + waveIndex 0 기본 폴백.
 export const SPAWN = {
   firstDelay: 600, // 전투 시작 후 첫 스폰까지
-  intervalMin: 1400,
-  intervalMax: 2600,
-  maxAlive: 3, // 동시 생존 적 상한
+  intervalMin: 1400, // 폴백(waveParams가 우선)
+  intervalMax: 2600, // 폴백
+  maxAlive: 3, // 폴백
   offRightX: 40, // 화면 우측 밖 스폰 여유 거리
   respawnDelay: 500 // 사망 후 다음 스폰 보너스 텀(웨이브 텀 외 추가 여유)
+};
+
+// ── 웨이브 에스컬레이션 (ideator 곡선) ──────────────────────────────────
+// runKills가 killsPerWave마다 1씩 waveIndex를 올린다. 진행할수록 적이
+// 더 단단(hpMult)·더 자주(interval↓)·더 많이(maxAlive↑) 나오고 보상도 늘어남(dropMult).
+export const WAVE = {
+  killsPerWave: 10
+};
+
+// waveIndex(w) → 그 웨이브의 스폰/체력/보상 파라미터.
+// 공식은 ideator 확정값. cap으로 후반 난이도가 발산하지 않게 묶는다.
+export function waveParams(w) {
+  return {
+    hpMult: Math.min(2.8, 1.0 + 0.12 * Math.max(0, w - 2)),
+    intervalMin: Math.max(700, 1400 - w * 40),
+    intervalMax: Math.max(1100, 2600 - w * 80),
+    maxAlive: Math.min(6, 3 + Math.floor(w / 4)),
+    dropMult: Math.min(1.8, 1.0 + w * 0.04)
+  };
+}
+
+// ── 적 → 대표 속성 맵 (R5 적기억용) ─────────────────────────────────────
+// 적이 어떤 속성에 내성을 학습하는지의 기준. R4선 미사용(자리만 확보).
+// 현재 적 + 기획서 예정 적까지 full map으로 둬 R5에서 바로 연결.
+export const ENEMY_MEMORY_MAP = {
+  sludge_zombie: 'PHYSICAL',
+  flanker_zombie: 'PHYSICAL',
+  grabber: 'PHYSICAL',
+  putrifier: 'TOXIC',
+  drone_zombie: 'SHOCK',
+  brute: 'FIRE'
 };
 
 // 전투 전용 색 (기획서 팔레트). flashHit/danger는 perf 지시대로 tint/alpha만 사용.
@@ -134,4 +166,34 @@ export const MOTION = {
   toastInMs: 180,           // fade-in
   toastStayMs: 1400,        // 유지
   toastOutMs: 420,          // fade-out
+
+  // ── 사망 오버레이 순차 등장 ──────────────────────────────────────────────
+  deathScrimMs: 600,          // 암막 페이드인 duration
+  deathTitleDelay: 400,       // 암막 기준 타이틀 등장 delay ms
+  deathTitleInMs: 220,        // 타이틀 스케일인 duration
+  deathTitleShakeAmp: 4,      // 타이틀 등장 후 흔들림 진폭 px
+  deathSummaryDelay: 680,     // 첫 요약 항목 delay ms
+  deathSummaryStagger: 90,    // 요약 항목 간 스태거 ms
+  deathCardDelay: 980,        // 유산 카드 스태거 시작 delay ms
+  deathCardStagger: 70,       // 카드 간 스태거 ms
+  deathCardSlideY: 10,        // 카드 아래서 올라오는 초기 오프셋 px
+
+  // ── 유산 카드 인터랙션 ─────────────────────────────────────────────────
+  legacyHoverScale: 1.04,     // hover 시 container scale 목표
+  legacyPulseMs: 100,         // 선택 펄스 반 사이클 ms (yoyo×repeat×2 ≈ 400ms)
+  confirmPulseMs: 700,        // 확정 버튼 활성 후 alpha 펄스 half-period ms
+
+  // ── 새 런 전환 ─────────────────────────────────────────────────────────
+  resetFlashMs: 90,           // 오렌지 플래시 인 duration ms
+  resetFadeInMs: 260,         // 암막색 → 전투뷰 복귀 페이드 duration ms
+
+  // ── 사망 직전 임팩트 플래시 ────────────────────────────────────────────
+  deathFlashAlpha: 0.55,      // 붉은 플래시 최대 alpha
+  deathFlashMs: 100,          // 플래시 인 duration ms
+  deathFlashOutMs: 180,       // 플래시 아웃 duration ms
+
+  // ── 웨이브 배너 ────────────────────────────────────────────────────────
+  waveBannerInMs: 160,        // 스케일+페이드 인 duration ms
+  waveBannerStayMs: 520,      // 유지 duration ms
+  waveBannerOutMs: 240,       // 스케일업+페이드 아웃 duration ms
 };
