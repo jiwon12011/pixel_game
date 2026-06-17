@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import ParallaxBackground from '../objects/ParallaxBackground.js';
 import CombatDirector from '../objects/CombatDirector.js';
+import PickupItem from '../objects/PickupItem.js';
 import { TEX, ENEMY_MANIFEST, WEAPON_MANIFEST } from '../assets/manifest.js';
 import {
   CHARACTER,
@@ -25,6 +26,8 @@ import { PIXEL_FONT, BODY_FONT } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
 import GameState from '../state/GameState.js';
 import { rollDrop } from '../constants/drops.js';
+import { PICKUPS } from '../constants/pickups.js';
+import { getRegion } from '../constants/regions.js';
 import { WEAPON_RECIPES, STAT_UPGRADES, defenseMultiplier } from '../constants/crafting.js';
 import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 import { legacyOptions } from '../constants/meta.js';
@@ -42,6 +45,7 @@ export default class CombatScene extends Phaser.Scene {
     this.combatReady = false;
     this.dangerOn = false;
     this.hitStopUntil = 0;   // 히트스톱 종료 타임스탬프 (ms)
+    this.activePickups = []; // 땅에 떨어진 재료 PickupItem들 — update에서 순회, teardown에서 정리
 
     this.cameras.main.setViewport(
       COMBAT_VIEW.x,
@@ -142,6 +146,10 @@ export default class CombatScene extends Phaser.Scene {
     this.director?.clearAll(); // Enemy.destroy가 트윈·컨테이너까지 정리
     this.director = null;
     this.hitStopUntil = 0;
+
+    // 땅에 남은 줍기 아이템 전부 소멸(트윈/입력 리스너까지) — 사망/재시작 누수 0.
+    for (const p of this.activePickups) p.destroy();
+    this.activePickups.length = 0;
 
     // 주인공 트윈 정리 — 사망이 playerAttack 런지 중간에 나면 3단계 체인/onComplete
     // (idleBobTween.resume 등)이 teardown 후에도 발화해 새 런 bob 상태가 꼬인다.
@@ -447,26 +455,140 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
-  // 적 처치 → 웨이브 진행 → 드롭 롤(웨이브 배율) → GameState 가산 → 줍기 연출.
+  // 적 처치 → 웨이브 진행 → 지역별 드롭 롤(웨이브 배율) → 코인 자동/재료 터치 줍기.
   onEnemyKilled(enemy) {
-    // 1) 처치 누적 → 웨이브 진행. 넘어가면 HUD 갱신 + 배너.
+    // 1) 처치 누적 → 웨이브 진행. 넘어가면 HUD 갱신 + 배너(지역명 포함).
     const { waveChanged, waveIndex } = GameState.addKill();
     this.refreshWaveHud();
     if (waveChanged) this.showWaveBanner(waveIndex);
 
-    // 2) 드롭 — 코인은 round, 재료는 floor로 dropMult 반영(희귀 재료 과인플레 방지).
-    const drop = rollDrop(enemy.typeKey);
+    // 2) 드롭 — 현재 웨이브의 지역 배율 반영. 코인은 round, 재료는 floor로 dropMult 반영.
+    const regionId = getRegion(GameState.waveIndex).id;
+    const drop = rollDrop(enemy.typeKey, regionId);
     const mult = waveParams(GameState.waveIndex).dropMult;
     if (mult !== 1) {
       drop.coins = Math.round((drop.coins || 0) * mult);
       for (const k of MATERIAL_ORDER) if (drop[k]) drop[k] = Math.floor(drop[k] * mult);
     }
-    const hasAny = drop.coins || MATERIAL_ORDER.some((k) => drop[k]);
-    if (!hasAny) return;
+
     const x = enemy.container.x;
     const y = enemy.container.y - enemy.displayHeight * 0.5;
-    GameState.applyDrop(drop, x, y); // 상태 가산 + 'drop'/'change' 발행
-    this.spawnPickup(drop, x, y); // 사망 위치 → HUD 카운터로 튐
+
+    // 3) 코인 — 즉시 자동 가산 + 우상단 HUD로 빨려가는 연출(기존 동작 유지).
+    if (drop.coins) {
+      GameState.applyDrop({ coins: drop.coins }, x, y);
+      this.flyPickup(
+        { key: 'coins', tex: TEX.COIN_REWARD, color: COMBAT_COLORS.gold },
+        x,
+        y,
+        this.resHud.coins,
+        0
+      );
+    }
+
+    // 4) 재료 — 즉시 가산하지 않고 땅에 떨어뜨린다(탭해야 획득).
+    this.spawnMaterialPickups(drop, x);
+  }
+
+  // 떨어진 재료를 땅(groundY-8 근처)에 PickupItem으로 스폰. 복수는 x±spread 흩뿌림.
+  // 화면 과밀(maxOnScreen 초과)이면 새 드롭은 탭 없이 자동 수집(작은 "자동수집" 표시).
+  // spawnIdx: 같은 처치에서 나온 순번 → spawnDelay 스태거(cosmetic, 수명 무관).
+  spawnMaterialPickups(drop, deathX) {
+    const groundItemY = this.groundY + PICKUPS.groundOffsetY;
+    let spawnIdx = 0;
+    for (const key of MATERIAL_ORDER) {
+      if (!drop[key]) continue;
+      const sx = deathX + Phaser.Math.Between(-PICKUPS.spreadX, PICKUPS.spreadX);
+
+      if (this.activePickups.length >= PICKUPS.maxOnScreen) {
+        this.autoCollectMaterial(key, drop[key], sx, groundItemY);
+        continue;
+      }
+
+      const pickup = new PickupItem(this, {
+        matKey: key,
+        count: drop[key],
+        x: sx,
+        y: groundItemY,
+        windowMs: PICKUPS.windowMs,
+        motionOk: this.motionOk,
+        depth: 64, // 적(topDepth+1)·DoT 위, 데미지숫자(70)·토스트(78) 아래
+        spawnDelay: spawnIdx * PICKUPS.spawnStaggerMs, // 동시 드롭 스태거 딜레이
+        // 탭 시점의 실제(드리프트된) 위치에서 줍기 연출이 나도록 라이브 좌표 사용.
+        onTap: (mk, cnt) => this.onPickupTapped(mk, cnt, pickup.container.x, pickup.container.y)
+      });
+      this.activePickups.push(pickup);
+      spawnIdx++;
+    }
+  }
+
+  // 재료 탭 획득 — GameState 가산('drop'/'change' 발행 → 희소 토스트 포함) + 줍기 팝 연출.
+  // fromTap: true → 인벤(하단 허브) 방향 빨려가기 연출 경로.
+  onPickupTapped(matKey, count, x, y) {
+    GameState.applyDrop({ [matKey]: count }, x, y);
+    this.popMaterial(matKey, count, x, y, 0, true);
+  }
+
+  // 과밀 자동 수집 — 즉시 가산 + 줍기 팝 + 작은 "자동수집" 태그(탭 안 했음을 알림).
+  autoCollectMaterial(matKey, count, x, y) {
+    GameState.applyDrop({ [matKey]: count }, x, y);
+    this.popMaterial(matKey, count, x, y, 0);
+    this.showAutoCollectTag(x, y);
+  }
+
+  // "자동수집" 작은 라벨 — 팝인(Back.out) → 상승 + 페이드. reduced-motion: 짧게 표시 후 제거.
+  showAutoCollectTag(x, y) {
+    const tag = this.add
+      .text(x, y - 14, '자동수집', {
+        fontFamily: BODY_FONT,
+        fontSize: '8px',
+        color: '#9ad0ff'
+      })
+      .setOrigin(0.5)
+      .setDepth(67);
+    tag.setShadow(1, 1, '#000000', 0, false, true);
+
+    if (!this.motionOk) {
+      this.time.delayedCall(450, () => tag.destroy());
+      return;
+    }
+
+    // 팝인: 작게→1 (Back.out 살짝 과슈트) → 상승+페이드
+    tag.setScale(0.55).setAlpha(0);
+    this.tweens.add({
+      targets: tag,
+      scale: 1,
+      alpha: 1,
+      duration: 160,
+      ease: 'Back.out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: tag,
+          y: y - 28,
+          alpha: 0,
+          duration: 460,
+          ease: 'Quad.out',
+          onComplete: () => tag.destroy()
+        });
+      }
+    });
+  }
+
+  // 땅에 떨어진 줍기 아이템 순회 — 좌측 드리프트 진행 + 이탈/만료분 소멸·제거.
+  // 핫패스 — 역순 splice로 할당 없이 제거. (탭 소멸은 PickupItem._collect가 직접 처리)
+  updatePickups(delta) {
+    const list = this.activePickups;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const p = list[i];
+      if (p.removed) {
+        list.splice(i, 1); // 탭으로 이미 소멸된 항목 정리
+        continue;
+      }
+      if (p.update(delta)) {
+        p.destroy();
+        list.splice(i, 1);
+      }
+    }
   }
 
   takePlayerDamage(amount) {
@@ -1089,42 +1211,71 @@ export default class CombatScene extends Phaser.Scene {
     this.waveBarFill.width = this.waveBarW * (inWave / WAVE.killsPerWave);
   }
 
-  // [모션 훅] 웨이브 진입 배너 — 스케일인 → 유지 → 스케일업+페이드. 전투 흐름 최소 간섭.
+  // [모션 훅] 웨이브 진입 배너 — "WAVE N" + 현재 지역명 서브라인. 지역이 바뀌는
+  // 웨이브면 서브라인을 강조(밝은 색 + "NEW AREA" 프리픽스). 스케일인→유지→스케일업+페이드.
   showWaveBanner(n) {
-    const t = this.add
-      .text(LOGICAL.width / 2, COMBAT_H * 0.3, `WAVE ${n}`, {
+    const region = getRegion(n);
+    const isNewRegion = n > 0 && getRegion(n - 1).id !== region.id;
+
+    // 두 텍스트를 컨테이너로 묶어 스케일/페이드를 함께 — 정렬 흔들림 없음.
+    const banner = this.add.container(LOGICAL.width / 2, COMBAT_H * 0.3).setDepth(75);
+
+    const main = this.add
+      .text(0, 0, `WAVE ${n}`, {
         fontFamily: PIXEL_FONT,
         fontSize: '20px',
         color: '#ff6020',
         stroke: '#1a1008',
         strokeThickness: 4
       })
-      .setOrigin(0.5)
-      .setDepth(75);
+      .setOrigin(0.5);
+
+    const subLabel = isNewRegion ? `▶ ${region.name}` : region.name;
+    const sub = this.add
+      .text(0, 18, subLabel, {
+        fontFamily: PIXEL_FONT,
+        fontSize: '9px',
+        color: isNewRegion ? '#ffd24a' : '#cbb89a'
+      })
+      .setOrigin(0.5);
+    sub.setShadow(1, 1, '#000000', 0, false, true);
+
+    banner.add([main, sub]);
 
     if (!this.motionOk) {
-      this.time.delayedCall(700, () => t.destroy());
+      this.time.delayedCall(700, () => banner.destroy());
       return;
     }
 
-    t.setScale(0.6).setAlpha(0);
+    banner.setScale(0.6).setAlpha(0);
     this.tweens.add({
-      targets: t,
+      targets: banner,
       scale: 1,
       alpha: 1,
       duration: MOTION.waveBannerInMs,
       ease: 'Back.out',
       onComplete: () => {
+        // 신규 지역: 착지 직후 scale 펄스로 "지역 바뀜" 임팩트 강조(yoyo 1회, 가볍게)
+        if (isNewRegion) {
+          this.tweens.add({
+            targets: banner,
+            scaleX: 1.07,
+            scaleY: 1.07,
+            duration: MOTION.waveBannerNewPulseMs, // 90ms
+            ease: 'Quad.out',
+            yoyo: true
+          });
+        }
         this.time.delayedCall(MOTION.waveBannerStayMs, () => {
-          if (!t.active) return;
+          if (!banner.active) return;
           // 아웃: 스케일 업 + 페이드 — 터지듯 사라져 전투에 다시 집중
           this.tweens.add({
-            targets: t,
+            targets: banner,
             scale: 1.22,
             alpha: 0,
             duration: MOTION.waveBannerOutMs,
             ease: 'Quad.in',
-            onComplete: () => t.destroy()
+            onComplete: () => banner.destroy()
           });
         });
       }
@@ -1164,27 +1315,15 @@ export default class CombatScene extends Phaser.Scene {
   }
 
   // ── 드롭 줍기 연출 ─────────────────────────────────────────────────────
-  // 코인은 우상단 HUD 카운터로 빨려들고, 재료는 사망 위치에서 아이콘이 떠올랐다
-  // 사라지는 "줍기 표시"(인벤 탭에 누적). 토스트는 onDropToast에서 별도.
-  spawnPickup(drop, x, y) {
-    if (drop.coins) {
-      this.flyPickup(
-        { key: 'coins', tex: TEX.COIN_REWARD, color: COMBAT_COLORS.gold },
-        x,
-        y,
-        this.resHud.coins,
-        0
-      );
-    }
-    let i = 0;
-    for (const key of MATERIAL_ORDER) {
-      if (!drop[key]) continue;
-      this.popMaterial(key, drop[key], x, y, i++);
-    }
-  }
+  // 코인은 우상단 HUD 카운터로 빨려들고(flyPickup), 재료는 탭/자동수집 시 사망 위치에서
+  // 아이콘이 떠올랐다 사라지는 "줍기 표시"(popMaterial). 토스트는 onDropToast에서 별도.
 
-  // 재료 1종 줍기 팝 — 아이콘 + ×N 라벨이 사망 위치에서 떠오르며 페이드.
-  popMaterial(key, count, x, y, idx) {
+  // 재료 1종 줍기 팝 — 아이콘 + ×N 라벨이 사망 위치에서 피드백 연출 후 사라짐.
+  // fromTap=false(기본): 포물선 상승 + 페이드 (자동수집/기존 경로).
+  // fromTap=true:  스케일 팝 → 인벤(하단 허브) 방향으로 축소+페이드 빨려가기.
+  //   "코인은 우상단, 재료는 하단" — flyPickup 톤 통일(Back/Quad.in), 목적지만 차별화.
+  // 누수 없음: 모든 경로의 onComplete에서 obj·label destroy.
+  popMaterial(key, count, x, y, idx, fromTap = false) {
     const meta = MATERIAL_META[key];
     const sx = x + Phaser.Math.Between(-MOTION.pickupSpreadX, MOTION.pickupSpreadX);
     let obj;
@@ -1215,34 +1354,66 @@ export default class CombatScene extends Phaser.Scene {
       return;
     }
 
-    // 스케일 팝 (obj만) — { from, to }로 delay 뒤에 작은→정상 팝.
-    // 레이블은 scale 1 고정. reduced-motion 분기는 위에서 이미 반환됨.
     const s0 = obj.scaleX;
-    this.tweens.add({
-      targets: obj,
-      scaleX: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
-      scaleY: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
-      delay: idx * 60,
-      duration: MOTION.matPopScaleMs,
-      ease: 'Back.out'
-    });
 
-    // 포물선 상승 + 페이드 — arcX 드리프트로 "뭔가 주웠다" 체감.
-    // 팝 tween과 동시에 시작해 상승하며 팝. onComplete에서 obj·label 정리(누수 없음).
-    const arcX = Phaser.Math.Between(-MOTION.matPopArcX, MOTION.matPopArcX);
-    this.tweens.add({
-      targets: [obj, label],
-      x: `+=${arcX}`,
-      y: `-=${22 + idx * 4}`,
-      alpha: 0,
-      delay: idx * 60,
-      duration: 700,
-      ease: 'Quad.out',
-      onComplete: () => {
-        obj.destroy();
-        label.destroy();
-      }
-    });
+    if (fromTap) {
+      // ── 탭 획득: 드라마틱 팝 → 인벤(하단) 빨려가기 ──────────────────────
+      // 라벨은 팝 구간에 빠르게 페이드(빨려가는 건 아이콘만)
+      this.tweens.add({
+        targets: label,
+        alpha: 0,
+        duration: MOTION.matCollectPopMs + 60,
+        ease: 'Quad.in'
+      });
+      // 아이콘: 스케일 팝(Back.out) → 하단 중앙으로 축소+페이드 빨려가기(Quad.in)
+      this.tweens.add({
+        targets: obj,
+        scaleX: s0 * 1.3,
+        scaleY: s0 * 1.3,
+        duration: MOTION.matCollectPopMs, // 80ms
+        ease: 'Back.out',
+        onComplete: () => {
+          this.tweens.add({
+            targets: obj,
+            x: LOGICAL.width / 2,  // 화면 가로 중앙으로 수렴
+            y: COMBAT_H + 10,      // 허브 경계 아래 — "인벤으로 들어간다" 힌트
+            scaleX: s0 * 0.2,
+            scaleY: s0 * 0.2,
+            alpha: 0,
+            duration: MOTION.matCollectFlyMs, // 320ms
+            ease: 'Quad.in',
+            onComplete: () => { obj.destroy(); label.destroy(); }
+          });
+        }
+      });
+    } else {
+      // ── 자동수집/기존 경로: 스케일 팝 + 포물선 상승 페이드 ─────────────────
+      // 레이블은 scale 1 고정. reduced-motion 분기는 위에서 이미 반환됨.
+      this.tweens.add({
+        targets: obj,
+        scaleX: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
+        scaleY: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
+        delay: idx * 60,
+        duration: MOTION.matPopScaleMs,
+        ease: 'Back.out'
+      });
+
+      // 포물선 상승 + 페이드 — arcX 드리프트로 "뭔가 주웠다" 체감.
+      const arcX = Phaser.Math.Between(-MOTION.matPopArcX, MOTION.matPopArcX);
+      this.tweens.add({
+        targets: [obj, label],
+        x: `+=${arcX}`,
+        y: `-=${22 + idx * 4}`,
+        alpha: 0,
+        delay: idx * 60,
+        duration: 700,
+        ease: 'Quad.out',
+        onComplete: () => {
+          obj.destroy();
+          label.destroy();
+        }
+      });
+    }
   }
 
   flyPickup(type, x, y, target, idx) {
@@ -1533,6 +1704,7 @@ export default class CombatScene extends Phaser.Scene {
   update(time, delta) {
     this.parallax.update(delta);
     this.updateHandWeaponPos(); // 손 무기를 캐릭터(bob/런지)에 붙여 따라가게
+    if (this.activePickups.length) this.updatePickups(delta); // 줍기 아이템 드리프트/만료
     // 히트스톱 구간엔 director(이동/공격 타이밍)만 중단 — 트윈 연출은 계속 진행
     if (this.combatReady && time >= this.hitStopUntil) {
       this.director.update(delta);

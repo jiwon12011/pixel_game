@@ -28,8 +28,9 @@ import scrapPartsUrl from '../../assets/ai-generated/items/individual/web/scrap_
 import skillPointUrl from '../../assets/ai-generated/items/individual/web/skill_point.webp';
 import notificationBadgeUrl from '../../assets/ai-generated/items/individual/web/notification_badge.webp';
 
-// 재료 아이콘 7종 — 전투 줍기/인벤/합성에서 모두 쓰여 선행 로드(소형 5~6KB).
+// 재료 아이콘 8종 — 전투 줍기/인벤/합성에서 모두 쓰여 선행 로드(소형 5~6KB).
 // 재생성: npm run optimize:assets (materials 카테고리, 128px webp q85)
+import matPlasticBottleUrl from '../../assets/ai-generated/items/materials/web/plastic_bottle.webp';
 import matRustyScrewsUrl from '../../assets/ai-generated/items/materials/web/rusty_screws.webp';
 import matCopperWireCoilUrl from '../../assets/ai-generated/items/materials/web/copper_wire_coil.webp';
 import matSmallFuelCanisterUrl from '../../assets/ai-generated/items/materials/web/small_fuel_canister.webp';
@@ -106,7 +107,8 @@ export const IMAGE_MANIFEST = [
   // 드롭 보상 아이콘 — 처치 즉시 줍기 연출에 필요해 선행 로드
   { key: TEX.COIN_REWARD, url: coinRewardUrl },
   { key: TEX.SCRAP_PARTS, url: scrapPartsUrl },
-  // 재료 7종 — 전투 줍기 토스트/팝 + 인벤/합성 공용. 키는 materials.js MATERIAL_META.iconKey와 1:1.
+  // 재료 8종 — 전투 줍기 토스트/팝 + 인벤/합성 공용. 키는 materials.js MATERIAL_META.iconKey와 1:1.
+  { key: 'mat-plastic-bottle', url: matPlasticBottleUrl },
   { key: 'mat-rusty-screws', url: matRustyScrewsUrl },
   { key: 'mat-copper-wire-coil', url: matCopperWireCoilUrl },
   { key: 'mat-small-fuel-canister', url: matSmallFuelCanisterUrl },

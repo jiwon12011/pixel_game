@@ -5,6 +5,8 @@
 //   iconKey  — Phaser 텍스처 키. assets/ai-generated/items/materials/web/<key>.webp
 //   grade    — 희소도(1 흔함 ~ 3 희귀). 토스트 스팸 억제·표시 톤에 사용.
 export const MATERIAL_META = {
+  // 페트병 — 도심 폐허 주력 흔한 재료(지역별 차등 드롭의 진입 재료). grade 1.
+  plastic_bottle: { key: 'plastic_bottle', name: '페트병', iconKey: 'mat-plastic-bottle', grade: 1 },
   rusty_screws: { key: 'rusty_screws', name: '녹슨 나사', iconKey: 'mat-rusty-screws', grade: 1 },
   copper_wire_coil: { key: 'copper_wire_coil', name: '구리선 코일', iconKey: 'mat-copper-wire-coil', grade: 1 },
   small_fuel_canister: { key: 'small_fuel_canister', name: '소형 연료통', iconKey: 'mat-small-fuel-canister', grade: 2 },
@@ -16,6 +18,7 @@ export const MATERIAL_META = {
 
 // 표시/순회 순서 — 인벤 리스트·재료 dict 순회의 단일 기준.
 export const MATERIAL_ORDER = [
+  'plastic_bottle',
   'rusty_screws',
   'copper_wire_coil',
   'small_fuel_canister',

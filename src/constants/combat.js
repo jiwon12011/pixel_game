@@ -273,4 +273,15 @@ export const MOTION = {
   matPopScaleFrom: 0.4,       // 팝 시작 스케일 ({ from, to }로 delay 후 점프)
   matPopScaleMs: 130,         // 스케일 팝 duration ms (상승과 오버랩 의도)
   matPopArcX: 10,             // 상승 중 포물선 X 드리프트 px (± 랜덤)
+
+  // ── 재료 탭 획득 → 인벤(하단 허브) 빨려가기 ──────────────────────────────
+  // fromTap=true 경로: 팝 → COMBAT_H 하단 방향으로 축소+페이드. 코인의 flyPickup과
+  // 톤 통일(Back/Quad.in), 목적지만 우상단 대신 하단(허브) 방향으로 차별화.
+  matCollectPopMs: 80,        // 탭 위치에서 스케일 팝 duration ms (Back.out)
+  matCollectFlyMs: 320,       // 인벤 방향 빨려가는 duration ms (Quad.in)
+
+  // ── 웨이브 배너 신규 지역 입장 스케일 펄스 ─────────────────────────────────
+  // 일반 웨이브 배너에서 한 단계 더 — 지역이 바뀌는 순간 임팩트 강조.
+  // Back.out 착지 직후 yoyo scale 펄스. 가볍게 1회(yoyo=true, 2회 이상 X).
+  waveBannerNewPulseMs: 90,   // 신규 지역 배너 착지 후 scale 펄스 반사이클 ms
 };
