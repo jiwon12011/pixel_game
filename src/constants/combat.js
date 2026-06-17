@@ -1,8 +1,17 @@
 // 전투 밸런싱 상수 — 한 곳에서 스폰/HP/데미지/속도를 튜닝(밸런싱 쉽게).
 // 거리/속도 단위는 논리 픽셀(layout.js LOGICAL 기준). 속도는 px/sec.
 
-// 세로 슬라이스 스폰 적 — 가벼운 일반 적 2종으로 시작.
-export const SLICE_SPAWN_LIST = ['sludge_zombie', 'flanker_zombie'];
+// 세로 슬라이스 스폰 적 — 일반 2종 + 화염내성(tank) + 독내성(putrifier) 4종.
+export const SLICE_SPAWN_LIST = ['sludge_zombie', 'flanker_zombie', 'tank_mutant', 'putrifier'];
+
+// 스폰 가중치 — 균등 대신 이 비율로 뽑아 tank를 희소화(CombatDirector.pickSpawnType).
+// spawnList에 있지만 여기 없는 타입은 1로 간주.
+export const SPAWN_WEIGHTS = {
+  sludge_zombie: 3,
+  flanker_zombie: 3,
+  putrifier: 2,
+  tank_mutant: 1
+};
 
 // 주인공 — 능력치(maxHP/atk/def)와 장착 무기(공격력/쿨다운/메카닉)는 이제
 // GameState가 소유한다. 여기 남은 값은 무기·스탯과 무관한 "전투장 규칙" 상수.
@@ -38,6 +47,24 @@ export const ENEMY_TYPES = {
     attackCooldown: 1150,
     displayHeight: 132,
     contactRange: 80
+  },
+  // 탱크 뮤턴트 — 느리고 단단한 화염내성 학습체(FIRE 채널). 스폰 가중치 최소.
+  tank_mutant: {
+    maxHP: 180,
+    speed: 22,
+    damage: 14,
+    attackCooldown: 1400,
+    displayHeight: 145,
+    contactRange: 85
+  },
+  // 부패체 — 독내성 학습체(TOXIC 채널). 빠른 편, 무리지어 전파 시너지.
+  putrifier: {
+    maxHP: 90,
+    speed: 28,
+    damage: 10,
+    attackCooldown: 950,
+    displayHeight: 128,
+    contactRange: 78
   }
 };
 
@@ -79,6 +106,7 @@ export const ENEMY_MEMORY_MAP = {
   flanker_zombie: 'PHYSICAL',
   grabber: 'PHYSICAL',
   putrifier: 'TOXIC',
+  tank_mutant: 'FIRE',
   drone_zombie: 'SHOCK',
   brute: 'FIRE'
 };
@@ -91,7 +119,9 @@ export const COMBAT_COLORS = {
   hitTint: 0xff0000, // 피격 틴트
   danger: 0xff2a2a, // 위험 비네트 펄스
   shock: 0x66ddff, // 감전된 적 청록빛 틴트
-  scrap: 0x8a6a3a // 스크랩 칩/토스트 배경(녹슨 철, 가독성 보정)
+  scrap: 0x8a6a3a,  // 스크랩 칩/토스트 배경(녹슨 철, 가독성 보정)
+  burnGlow: 0xff5500,  // 화상 DoT tint 목표색 (주황-적) — setDotTint 보간 종점
+  toxicGlow: 0x33ff77  // 독 DoT tint 목표색 (형광 녹) — setDotTint 보간 종점
 };
 
 // CSS 문자열 색 (텍스트용)
@@ -99,7 +129,9 @@ export const COMBAT_CSS = {
   damage: '#ff6020',
   pierce: '#66ddff', // 관통 추가타 — 감전빛 청록으로 구분
   playerHurt: '#ffd0d0',
-  resisted: '#8a8a8a' // R5 적기억 내성 히트 — 무채색 회색으로 "안 통함" 신호
+  resisted: '#8a8a8a', // R5 적기억 내성 히트 — 무채색 회색으로 "안 통함" 신호
+  burnDot: '#ff8a3a', // 화염 DoT 틱 — 직접타보다 옅은 주황(작게 표기)
+  toxicDot: '#20ff9a' // 독 DoT 틱 — 청록
 };
 
 // 모션 연출 타이밍/수치 상수 — motion-engineer 전담 튜닝 영역.
@@ -197,4 +229,10 @@ export const MOTION = {
   waveBannerInMs: 160,        // 스케일+페이드 인 duration ms
   waveBannerStayMs: 520,      // 유지 duration ms
   waveBannerOutMs: 240,       // 스케일업+페이드 아웃 duration ms
+
+  // ── DoT tint 맥동 (화상·독 경량 경로) ──────────────────────────────────────
+  // flashHit(셰이크+9 delayedCall)과 완전 분리. tween repeat:-1 만 사용, delayedCall 0.
+  // setDotTint에서 헬퍼 객체 { v:0→1 } 보간 → sprite.setTint 갱신. 누수 없음.
+  dotBurnPulseMs: 380,        // 화상 tint half-period ms (Sine.inOut yoyo)
+  dotToxicPulseMs: 560,       // 독 tint half-period ms
 };

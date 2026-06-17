@@ -116,6 +116,7 @@ export default class CombatScene extends Phaser.Scene {
       depth: this.parallax.topDepth + 1,
       motionOk: this.motionOk,
       getWaveParams: () => waveParams(GameState.waveIndex),
+      onDotTick: (enemy, dmg) => this.applyDotTick(enemy, dmg),
       player: {
         getX: () => this.playerX,
         getAttackCooldown: () => this.currentWeapon().cooldown,
@@ -224,13 +225,57 @@ export default class CombatScene extends Phaser.Scene {
       resisted ? COMBAT_CSS.resisted : isPierce ? COMBAT_CSS.pierce : COMBAT_CSS.damage,
       resisted
     );
-    // 감전 메카닉 — 관통타는 제외(스펙).
-    if (!isPierce && !killed) {
-      const mech = this.currentWeapon().mechanic;
-      if (mech?.type === 'shock' && Math.random() < mech.chance) {
-        enemy.applyShock(mech.slowMult, mech.cdMult, mech.durationMs);
-      }
+    // 메카닉 적용 — 관통 추가타(isPierce)·처치 시 제외(스펙). 헬퍼로 빼 핫패스 가독성 유지.
+    if (!isPierce && !killed) this.applyWeaponMechanic(enemy, this.currentWeapon());
+    if (killed) this.onEnemyKilled(enemy);
+  }
+
+  // 직접타 메카닉 분기 — shock(감전) / burn·toxic(DoT). pierce는 추가타라 호출부에서 차단.
+  // DoT는 enemy 상태 필드만 세팅(타이머 X) → 틱은 director 단일 update가 처리.
+  applyWeaponMechanic(enemy, weapon) {
+    const mech = weapon.mechanic;
+    if (!mech) return;
+    switch (mech.type) {
+      case 'shock':
+        if (Math.random() < mech.chance) {
+          enemy.applyShock(mech.slowMult, mech.cdMult, mech.durationMs);
+        }
+        break;
+      case 'burn':
+        if (Math.random() < mech.chance) {
+          enemy.applyBurn(mech.dmgPerTick, mech.tickMs, mech.durationMs);
+        }
+        break;
+      case 'toxic':
+        if (Math.random() < mech.chance) {
+          enemy.applyToxic(mech.dmgPerTick, mech.tickMs, mech.durationMs);
+          // 전파 — 가장 가까운 다른 적 1체에 독 옮김(noSpread=true로 재전파 차단).
+          if (Math.random() < mech.spreadChance && this.director) {
+            const other = this.director.nearestOtherEnemy(enemy);
+            if (other) other.applyToxic(mech.dmgPerTick, mech.tickMs, mech.durationMs, true);
+          }
+        }
+        break;
+      default:
+        break;
     }
+  }
+
+  // DoT 1틱 — director가 타이밍을 결정해 호출. 직접타가 아니므로 적기억 tally/내성 제외(단순화):
+  // 내성/학습은 dealDamage의 직접타에서만 처리되고, 여기선 순수 틱 데미지만 적용한다.
+  // fromDot:true → takeDamage가 flashHit(셰이크+9 delayedCall) 생략 → 경량 DoT 경로.
+  applyDotTick(enemy, dmg) {
+    if (!enemy || enemy.dead) return;
+    const killed = enemy.takeDamage(dmg, { fromDot: true });
+    // DoT 숫자는 작게 + 색 구분(화염 주황 / 독 청록)으로 직접타와 시각 분리, 스팸 억제.
+    this.spawnDamageNumber(
+      enemy.container.x,
+      enemy.container.y - enemy.displayHeight - 4,
+      dmg,
+      enemy.dotType === 'toxic' ? COMBAT_CSS.toxicDot : COMBAT_CSS.burnDot,
+      false,
+      true // small — DoT 표기
+    );
     if (killed) this.onEnemyKilled(enemy);
   }
 
@@ -1167,20 +1212,21 @@ export default class CombatScene extends Phaser.Scene {
   }
 
   // ── 데미지 숫자 팝업 ─────────────────────────────────────────────────
-  spawnDamageNumber(x, y, amount, color, isResisted = false) {
+  spawnDamageNumber(x, y, amount, color, isResisted = false, small = false) {
     // 가로 흩뿌림: 같은 위치에 숫자가 겹치는 것 방지 + 레트로 튐 감성
+    // small=true(DoT 틱)는 작은 폰트 + 팝 없이 잔잔하게 — 직접타와 시각 위계 분리.
     const driftX = Phaser.Math.Between(-MOTION.dmgDriftX, MOTION.dmgDriftX);
     const t = this.add
       .text(x + driftX, y, String(amount), {
         fontFamily: PIXEL_FONT,
-        fontSize: '13px',
+        fontSize: small ? '9px' : '13px',
         color,
         stroke: '#1a1008',
-        strokeThickness: 3
+        strokeThickness: small ? 2 : 3
       })
       .setOrigin(0.5)
       .setDepth(70)
-      .setScale(MOTION.dmgScaleFrom); // 팝 시작 스케일
+      .setScale(small ? 1 : MOTION.dmgScaleFrom); // 팝 시작 스케일(small은 팝 생략)
 
     // R5 내성 라벨 — 숫자 위 "RESIST"(8px, plain, stroke 없음). 숫자와 함께
     // 상승·페이드·제거(트윈 onComplete에서 destroy)되어 누수 없음.

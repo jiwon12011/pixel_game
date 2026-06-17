@@ -16,11 +16,24 @@ export const DROP_TABLES = {
     { res: 'SCRAP', min: 0, max: 1, chance: 0.6 },
     { res: 'ELEC', min: 1, max: 1, chance: 0.08 },
     { res: 'POWDER', min: 1, max: 1, chance: 0.18 }
+  ],
+  // 탱크 뮤턴트 — 희소·단단한 만큼 보상 두둑(코인/SCRAP 확정 + POWDER 후함).
+  tank_mutant: [
+    { res: 'coins', min: 10, max: 16, chance: 1 },
+    { res: 'SCRAP', min: 2, max: 4, chance: 1 },
+    { res: 'POWDER', min: 1, max: 2, chance: 0.45 },
+    { res: 'ELEC', min: 1, max: 1, chance: 0.2 }
+  ],
+  // 부패체 — POWDER 위주 드롭(투척 트리 재료 공급원).
+  putrifier: [
+    { res: 'coins', min: 5, max: 9, chance: 1 },
+    { res: 'SCRAP', min: 1, max: 2, chance: 0.8 },
+    { res: 'POWDER', min: 1, max: 2, chance: 0.55 },
+    { res: 'ELEC', min: 1, max: 1, chance: 0.12 }
   ]
 
   // ── 확장 자리(다음 라운드 적 추가 시 채움) ──────────────────────────
   // grabber:      [{ res:'ELEC',   min:2, max:2, chance:0.30 }, ...]
-  // putrifier:    [{ res:'POWDER', min:2, max:2, chance:0.35 }, ...]
   // drone_zombie: [{ res:'ELEC',   min:3, max:3, chance:0.60 }, ...]
 };
 

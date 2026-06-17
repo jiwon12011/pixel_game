@@ -41,6 +41,20 @@ export default class Enemy {
     this.shockUntil = 0;      // scene.time.now 기준 만료 타임스탬프(ms)
     this.shocked = false;
 
+    // DoT(화염 burn / 독 toxic) 상태 — applyShock과 동일하게 "상태 필드만" 세팅한다.
+    // Phaser 타이머는 만들지 않는다(per-enemy 타이머 금지, perf). 틱/만료는 director가
+    // 단일 update 루프에서 scene.time.now와 비교해 처리. destroy 시 객체째 소멸 → 누수 0.
+    this.dotType = null;      // null | 'burn' | 'toxic' (한 슬롯 — 새 적용은 refresh/덮어쓰기)
+    this.dotDmgPerTick = 0;
+    this.dotTickMs = 0;
+    this.dotNextTickAt = 0;   // 다음 틱 타임스탬프(ms)
+    this.dotExpiresAt = 0;    // 만료 타임스탬프(ms)
+    this.dotNoSpread = false; // 독 전파로 걸린 경우 true → 재전파 차단
+
+    // DoT 연출 전용 필드 — setDotTint/clearDot/die/destroy에서 일괄 정리.
+    this._dotPulseTween = null;  // repeat:-1 tween 참조 → .stop()으로 누수 없이 제거
+    this._dotTintLocked = false; // flashHit 진행 중 true → dot onUpdate가 tint 건드리지 않음
+
     const src = scene.textures.get(typeKey).getSourceImage();
     const scale = this.def.displayHeight / src.height;
     this.baseScale = scale;
@@ -136,12 +150,103 @@ export default class Enemy {
     this.restoreTint();
   }
 
-  // 현재 상태에 맞는 기본 틴트 복원 — 감전 중이면 청록, 아니면 클리어.
-  // flashHit의 흰/빨강 틴트가 끝난 뒤에도 이걸 호출해 감전 표시가 유지되게 한다.
+  // [메카닉] 화염 DoT — 상태 필드만 세팅(타이머 X). 갱신(refresh) 가능.
+  applyBurn(dmgPerTick, tickMs, durationMs) {
+    this._applyDot('burn', dmgPerTick, tickMs, durationMs, false);
+  }
+
+  // [메카닉] 독 DoT — burn과 동형. noSpread=true면 전파로 걸린 것(재전파 차단).
+  applyToxic(dmgPerTick, tickMs, durationMs, noSpread = false) {
+    this._applyDot('toxic', dmgPerTick, tickMs, durationMs, noSpread);
+  }
+
+  _applyDot(type, dmgPerTick, tickMs, durationMs, noSpread) {
+    if (this.dead) return;
+    const now = this.scene.time.now;
+    this.dotType = type;
+    this.dotDmgPerTick = dmgPerTick;
+    this.dotTickMs = tickMs;
+    this.dotNextTickAt = now + tickMs; // 첫 틱은 한 주기 뒤(즉발 0)
+    this.dotExpiresAt = now + durationMs;
+    this.dotNoSpread = noSpread;
+    this.setDotTint();
+  }
+
+  clearDot() {
+    this.dotType = null;
+    this.dotDmgPerTick = 0;
+    this._dotPulseTween?.stop(); // 맥동 트윈 정리 — dotType=null 후에 stop해야 onUpdate 가드 불필요
+    this._dotPulseTween = null;
+    this.restoreTint();
+  }
+
+  // [모션 훅] DoT tint 맥동 — 화상: 주황-적(0xff5500), 독: 형광녹(0x33ff77).
+  // 헬퍼 { v:0→1 } 보간 tween의 onUpdate에서 sprite.setTint 갱신.
+  // delayedCall 0, repeat:-1 tween은 _dotPulseTween에 저장 → clearDot/die/destroy에서 .stop().
+  // 우선순위: flashHit(_dotTintLocked) > 감전(shocked) > DoT > clear.
+  // reduced-motion: 정적 tint만, 맥동 없음.
+  setDotTint() {
+    // 이전 맥동 트윈 정리(refresh/덮어쓰기 / applyBurn→applyToxic 전환 대응)
+    this._dotPulseTween?.stop();
+    this._dotPulseTween = null;
+
+    if (!this.dotType) return;
+
+    const isBurn = this.dotType === 'burn';
+    const baseColor = isBurn ? COMBAT_COLORS.burnGlow : COMBAT_COLORS.toxicGlow;
+    const duration = isBurn ? MOTION.dotBurnPulseMs : MOTION.dotToxicPulseMs;
+
+    // reduced-motion: 정적 tint — 감전 중이면 감전 우선(shock tint 유지)
+    if (!this.motionOk) {
+      if (!this.shocked) this.sprite.setTint(baseColor);
+      return;
+    }
+
+    // RGB 채널 분해 — onUpdate에서 매 프레임 재계산 안 하려고 미리 뽑아둠
+    const tr = (baseColor >> 16) & 0xff;
+    const tg = (baseColor >> 8) & 0xff;
+    const tb = baseColor & 0xff;
+
+    // 헬퍼 0→1 보간 tween (setTint는 정수 4개 세팅 수준 — 매 프레임 호출해도 cheap)
+    const helper = { v: 0 };
+    this._dotPulseTween = this.scene.tweens.add({
+      targets: helper,
+      v: 1,
+      duration,
+      ease: 'Sine.inOut',
+      yoyo: true,
+      repeat: -1,
+      onUpdate: () => {
+        // 사망·피격플래시·감전 구간엔 건너뜀 — 각 상태가 tint를 소유함
+        if (this.dead || this._dotTintLocked || this.shocked) return;
+        const t = helper.v;
+        // 0xffffff(변화없음) → baseColor 선형 보간
+        const r = Math.round(255 + (tr - 255) * t);
+        const g = Math.round(255 + (tg - 255) * t);
+        const b = Math.round(255 + (tb - 255) * t);
+        this.sprite.setTint((r << 16) | (g << 8) | b);
+      }
+    });
+  }
+
+  // 현재 상태에 맞는 기본 tint 복원 — 우선순위: 감전 > DoT 맥동 > 클리어.
+  // flashHit 종료(155ms) / clearShock / clearDot 모두 이 경로를 통한다.
   restoreTint() {
     if (this.dead) return;
-    if (this.shocked) this.sprite.setTint(COMBAT_COLORS.shock);
-    else this.sprite.clearTint();
+    if (this.shocked) {
+      // 감전: 청록 tint — DoT 맥동보다 우선
+      this.sprite.setTint(COMBAT_COLORS.shock);
+    } else if (this.dotType) {
+      if (this._dotPulseTween) {
+        // motionOk: 맥동 tween이 매 프레임 tint를 담당 → 별도 조치 불필요
+      } else {
+        // reduced-motion: flashHit/clearShock 이후 정적 tint 재적용
+        const c = this.dotType === 'burn' ? COMBAT_COLORS.burnGlow : COMBAT_COLORS.toxicGlow;
+        this.sprite.setTint(c);
+      }
+    } else {
+      this.sprite.clearTint();
+    }
   }
 
   syncPosition() {
@@ -149,12 +254,17 @@ export default class Enemy {
     this.container.y = this.groundY + this.shakeY + this.bobY;
   }
 
-  /** 주인공에게서 피해를 받음. @returns {boolean} 이 타격으로 사망했는가 */
-  takeDamage(amount) {
+  /**
+   * 피해를 받음. @returns {boolean} 이 타격으로 사망했는가
+   * @param {number} amount
+   * @param {{ fromDot?: boolean }} [opts]
+   *   fromDot=true → flashHit(셰이크+9 delayedCall) 생략 — DoT 경량 경로.
+   */
+  takeDamage(amount, { fromDot = false } = {}) {
     if (this.dead) return false;
     this.hp = Math.max(0, this.hp - amount);
     this.hpFill.width = this.barW * (this.hp / this.maxHP);
-    this.flashHit();
+    if (!fromDot) this.flashHit();
     if (this.hp <= 0) {
       this.die();
       return true;
@@ -167,6 +277,7 @@ export default class Enemy {
   flashHit() {
     // 임팩트 순간 흰색 플래시, 이후 붉은 잔상, 마지막 클리어
     // (모든 delayedCall 반환값을 _timers에 저장 → destroy/die에서 유령 타이머 정리)
+    this._dotTintLocked = true; // DoT 맥동 onUpdate를 일시 잠금 — 피격 플래시가 우선
     this.sprite.setTint(0xffffff);
     this._timers.push(
       this.scene.time.delayedCall(45, () => {
@@ -175,7 +286,8 @@ export default class Enemy {
     );
     this._timers.push(
       this.scene.time.delayedCall(155, () => {
-        if (!this.dead) this.restoreTint(); // 감전 중이면 청록 유지, 아니면 클리어
+        this._dotTintLocked = false; // 잠금 해제 → dot 맥동 트윈이 다음 프레임에 재개
+        if (!this.dead) this.restoreTint(); // 감전·DoT 상태 반영해 복원
       })
     );
 
@@ -223,6 +335,8 @@ export default class Enemy {
     if (this.dead) return;
     this.dead = true;
     this._clearTimers(); // 대기 중인 flashHit 타이머 정리(이미 dead 가드라 무해하지만 유령 제거)
+    this._dotPulseTween?.stop(); // DoT 맥동 트윈 정리 — helper가 별도 객체라 killTweensOf(this) 불충분
+    this._dotPulseTween = null;
     this.hpBg.setVisible(false);
     this.hpFill.setVisible(false);
     this.sprite.clearTint();
@@ -281,6 +395,8 @@ export default class Enemy {
     // dead=true로 둬서 비동기 delayedCall(flashHit/restoreTint)이 파괴된 sprite를 건드리지 않게.
     this.dead = true;
     this._clearTimers();
+    this._dotPulseTween?.stop(); // DoT 맥동 트윈 — helper 기반이라 killTweensOf(this) 불충분
+    this._dotPulseTween = null;
     this.bobTween?.stop();
     this.scene.tweens.killTweensOf(this);
     if (this.container && !this.removed) {

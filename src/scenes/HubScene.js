@@ -41,6 +41,15 @@ const C = {
 };
 const FILL = { active: 0xff6020, disabled: 0x2a2a2a };
 
+// 무기 속성 태그 → 능력 설명 색. FIRE 주황·TOXIC 청록 표식(designer 스펙).
+const ATTR_COLOR = {
+  FIRE: C.orange,
+  TOXIC: C.toxic,
+  SHOCK: '#66ddff',
+  PIERCE: '#66ddff',
+  PHYSICAL: C.gray
+};
+
 export default class HubScene extends Phaser.Scene {
   constructor() {
     super('HubScene');
@@ -283,26 +292,26 @@ export default class HubScene extends Phaser.Scene {
       return;
     }
 
-    // 헤더: 현재 장착 무기
-    this.equipIcon = this.add.image(CONTENT.x + 22, CONTENT.y + 16, 'pipe_wrench').setScale(0.2);
+    // 헤더(축소 26px): 현재 장착 무기 — 5칸을 backdrop 안에 넣기 위해 헤더를 압축.
+    this.equipIcon = this.add.image(CONTENT.x + 20, CONTENT.y + 14, 'pipe_wrench').setScale(0.16);
     this.equipName = this.add
-      .text(CONTENT.x + 42, CONTENT.y + 9, '', { fontFamily: PIXEL_FONT, fontSize: '12px', color: C.gold })
+      .text(CONTENT.x + 38, CONTENT.y + 8, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.gold })
       .setOrigin(0, 0.5);
     this.equipAbility = this.add
-      .text(CONTENT.x + 42, CONTENT.y + 23, '', { fontFamily: BODY_FONT, fontSize: '10px', color: C.gray })
+      .text(CONTENT.x + 38, CONTENT.y + 20, '', { fontFamily: BODY_FONT, fontSize: '9px', color: C.gray })
       .setOrigin(0, 0.5);
     this.equipAbility.setShadow(1, 1, '#000000', 0, false, true);
     this.layer(this.equipIcon, this.equipName, this.equipAbility);
 
     // 헤더 구분선
     this.layer(
-      this.add.rectangle(CONTENT.x + 6, CONTENT.y + 32, CONTENT.w - 12, 1, 0x000000, 0.6).setOrigin(0, 0.5)
+      this.add.rectangle(CONTENT.x + 6, CONTENT.y + 29, CONTENT.w - 12, 1, 0x000000, 0.6).setOrigin(0, 0.5)
     );
 
-    // 무기 슬롯(근접 3종)
-    const startY = CONTENT.y + 36;
-    const rowH = 48;
-    const gap = 2;
+    // 무기 슬롯 5칸(근접 3 + 투척 2) — rowH 30·gap0으로 203px 안에 스크롤 없이 fit.
+    const startY = CONTENT.y + 31;
+    const rowH = 30;
+    const gap = 0;
     this.weaponRows = WEAPON_ORDER.map((id, i) => this.buildWeaponRow(id, startY + i * (rowH + gap), rowH));
 
     this.refreshActive = () => this.refreshCraft();
@@ -313,48 +322,48 @@ export default class HubScene extends Phaser.Scene {
     const recipe = WEAPON_RECIPES[id];
     const cy = top + rowH / 2;
 
-    // 아이콘(40px 목표) — 원본 정사각 128 기준 스케일
-    const icon = this.add.image(CONTENT.x + 26, cy, id);
+    // 아이콘(30px 목표) — 원본 정사각 128 기준 스케일
+    const icon = this.add.image(CONTENT.x + 20, cy, id);
     if (this.textures.exists(id)) {
       const src = this.textures.get(id).getSourceImage();
-      icon.setScale(42 / src.height);
+      icon.setScale(30 / src.height);
     }
     this.layer(icon);
 
-    // 이름 + 능력
+    // 이름(cy-8) + 능력(cy+2) — 능력은 속성색으로 FIRE 주황·TOXIC 청록 표식.
     this.layer(
       this.add
-        .text(CONTENT.x + 50, cy - 13, recipe.name, {
+        .text(CONTENT.x + 40, cy - 8, recipe.name, {
           fontFamily: PIXEL_FONT,
-          fontSize: '11px',
+          fontSize: '10px',
           color: C.gold
         })
         .setOrigin(0, 0.5)
     );
     const ability = this.add
-      .text(CONTENT.x + 50, cy, recipe.ability, {
+      .text(CONTENT.x + 40, cy + 2, recipe.ability, {
         fontFamily: BODY_FONT,
         fontSize: '9px',
-        color: C.gray
+        color: ATTR_COLOR[recipe.attrTag] || C.gray
       })
       .setOrigin(0, 0.5);
     ability.setShadow(1, 1, '#000000', 0, false, true);
     this.layer(ability);
 
-    // 재료 칩(색칩 + 보유/필요). 보유 무기는 숨김.
+    // 재료 칩(색칩 + 보유/필요). 보유 무기는 숨김. 간격 k*50, 능력 아래 줄(cy+11).
     const chips = [];
     const costEntries = Object.entries(recipe.cost || {});
     costEntries.forEach(([part, need], k) => {
-      const px = CONTENT.x + 50 + k * 62;
-      const py = cy + 14;
+      const px = CONTENT.x + 40 + k * 50;
+      const py = cy + 11;
       const chip = this.add
-        .rectangle(px, py, 8, 8, PART_META[part].color)
+        .rectangle(px, py, 7, 7, PART_META[part].color)
         .setOrigin(0, 0.5)
         .setStrokeStyle(1, 0x000000, 0.5);
       const txt = this.add
-        .text(px + 12, py, `${PART_META[part].label} 0/${need}`, {
+        .text(px + 10, py, `${PART_META[part].label} 0/${need}`, {
           fontFamily: PIXEL_FONT,
-          fontSize: '8px',
+          fontSize: '7px',
           color: C.gray
         })
         .setOrigin(0, 0.5);
@@ -362,8 +371,8 @@ export default class HubScene extends Phaser.Scene {
       chips.push({ part, need, chip, txt });
     });
 
-    // 액션 버튼(제작/장착/상태)
-    const btn = this.makeButton(CONTENT.x + CONTENT.w - 40, cy, 72, 28, () => {
+    // 액션 버튼(제작/장착/상태) — 68×24.
+    const btn = this.makeButton(CONTENT.x + CONTENT.w - 38, cy, 68, 24, () => {
       if (GameState.ownedWeapons.has(id)) {
         GameState.equipWeapon(id);
         return;
@@ -380,7 +389,7 @@ export default class HubScene extends Phaser.Scene {
     const eq = WEAPON_RECIPES[GameState.equippedWeapon] || WEAPON_RECIPES.pipe_wrench;
     if (this.textures.exists(eq.id)) {
       const src = this.textures.get(eq.id).getSourceImage();
-      this.equipIcon.setTexture(eq.id).setScale(30 / src.height);
+      this.equipIcon.setTexture(eq.id).setScale(22 / src.height); // 축소 헤더에 맞춤
     }
     this.equipName.setText(eq.name);
     this.equipAbility.setText(`장착 중 · ${eq.ability}`);

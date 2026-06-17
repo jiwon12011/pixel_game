@@ -34,7 +34,10 @@ export function defenseMultiplier(def) {
 //   mechanic  — 전투 특수효과(없으면 null)
 //     · shock : 히트 시 chance 확률로 대상 감전 → speed*slowMult, attackCooldown*cdMult, durationMs
 //     · pierce: 사거리 내 2번째 적에게 falloff 배율 추가타(관통타는 메카닉 트리거 제외)
-//   attrTag   — 무기 속성 태그(R5 적기억 tally 키). R4선 미사용, 분류만.
+//     · burn  : chance 확률로 화염 DoT → dmgPerTick씩 tickMs 주기로 durationMs 동안(투척 화염병)
+//     · toxic : chance 확률로 독 DoT(burn과 동일 파라미터) + spreadChance로 가장 가까운 다른 적 1체 전파
+//               DoT 틱은 per-enemy 타이머 없이 director 단일 update에서 처리(perf). 직접타만 적기억 대상.
+//   attrTag   — 무기 속성 태그(R5 적기억 tally 키). FIRE/TOXIC로 적기억 4채널 가동.
 export const WEAPON_RECIPES = {
   pipe_wrench: {
     id: 'pipe_wrench',
@@ -71,11 +74,50 @@ export const WEAPON_RECIPES = {
     mechanic: { type: 'pierce', falloff: 0.5 },
     attrTag: 'PIERCE',
     ability: '2번째 적 관통 ×0.5'
+  },
+
+  // ── 투척 트리 (화염/독 DoT) — 근접과 독립 라인. molotov가 시작점. ──────
+  molotov: {
+    id: 'molotov',
+    name: '화염병',
+    tier: '투척 · 시작',
+    atkBonus: 5,
+    cooldown: 850,
+    requires: null, // 투척 라인 독립 시작(근접 선행 불필요)
+    cost: { SCRAP: 5, POWDER: 5 },
+    mechanic: { type: 'burn', chance: 0.5, dmgPerTick: 4, tickMs: 500, durationMs: 2000 },
+    attrTag: 'FIRE',
+    ability: '히트 50% 화상 도트'
+  },
+  poison_gas_canister: {
+    id: 'poison_gas_canister',
+    name: '독가스통',
+    tier: '투척 · 상위',
+    atkBonus: 12,
+    cooldown: 1100,
+    requires: 'molotov',
+    cost: { SCRAP: 10, POWDER: 8, ELEC: 2 },
+    mechanic: {
+      type: 'toxic',
+      chance: 0.35,
+      dmgPerTick: 3,
+      tickMs: 600,
+      durationMs: 2400,
+      spreadChance: 0.4
+    },
+    attrTag: 'TOXIC',
+    ability: '35% 중독 · 전파'
   }
 };
 
-// 합성 탭 무기 슬롯 표시 순서(근접 트리). 다음 라운드에 원거리/설치/특수 트리가 이어짐.
-export const WEAPON_ORDER = ['pipe_wrench', 'electric_shock_wrench', 'plasma_shredder'];
+// 합성 탭 무기 슬롯 표시 순서 — 근접 3종 + 투척 2종(5칸). 다음 라운드에 원거리/설치 트리가 이어짐.
+export const WEAPON_ORDER = [
+  'pipe_wrench',
+  'electric_shock_wrench',
+  'plasma_shredder',
+  'molotov',
+  'poison_gas_canister'
+];
 
 // 파츠 표시 메타 — 색칩 + 라벨 (designer 스펙).
 export const PART_META = {
