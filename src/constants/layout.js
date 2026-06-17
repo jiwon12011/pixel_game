@@ -25,7 +25,11 @@ export const PARALLAX = {
   // L4(노면) 기준 텍스처 px/sec — tileScale=1.0이라 텍스처 이동량 = 화면 이동량.
   // 구 tileScale(0.42)이 사라져 체감 속도가 그대로 유지되도록 190→80으로 보정(190*0.42≈80).
   baseSpeed: 80,
-  factors: { l1: 0.1, l2: 0.3, l3: 0.6, l4: 1.0 }
+  factors: { l1: 0.1, l2: 0.3, l3: 0.6, l4: 1.0 },
+  // 노면(L3/L4 등)을 아래로 내리는 양(px). 위 빈 영역은 뒤 하늘(L1)이 채움.
+  // groundY도 같은 양 내려 캐릭터가 노면에 그대로 붙어있게.
+  // 값을 올리면 노면이 더 아래로 — 상단 주황 하늘이 더 넓게 보인다. 튜닝 포인트.
+  groundDropY: 40
 };
 
 // 노면 위 캐릭터 발 위치 — 전투 뷰 높이에 대한 비율 (L4 노면 윗면). 튜닝값.
@@ -49,12 +53,45 @@ export const CHARACTER_STAGES = {
   8: { texKey: 'SCRAPPER_STAGE_08', footOriginY: 0.9639, originX: 0.4695 }
 };
 
-// 현재 주인공 진행 단계. 시작은 "제일 구린 옷"인 1단계.
-export const CURRENT_STAGE = 1;
+// 진행 단계는 더 이상 고정값이 아니다 — 런 스코프 멀티신호 powerScore로 파생.
+// 부팅/맨손 시작 기준값만 1단계로 둔다(아래 CHARACTER 초기 origin). 런타임은 deriveStage가 결정.
+const BASE_STAGE = 1;
 
-// 캐릭터 공통 배치/스케일 + 현재 단계의 실측 origin을 합친다.
+// 8단계 진입 최소 powerScore. 사망 시 런 스냅샷 전부 0/1로 리셋 → stage1로 복귀.
+// 기존 statPower 단일신호는 stat 합 ~3에서 천장이 막혀 후반 단계가 죽은 콘텐츠였다.
+// → 웨이브/킬/무기/보스까지 합산하는 멀티신호로 8단계까지 자연 도달하게 곡선을 올린다.
+export const STAGE_THRESHOLDS = [0, 4, 7, 11, 15, 20, 26, 34]; // stage1~8 진입 최소 powerScore
+
+// 멀티신호 전투력 — 단순 stat 합을 넘어 런 진행도 전반을 점수화.
+//   statPower : maxHP+atk+def 업그레이드 레벨 합(투자량)
+//   waveBonus : 2웨이브당 +1(생존 깊이)
+//   killBonus : 20킬당 +1(누적 전과)
+//   weaponBonus: 보유 무기 수-1, 최대 +4(다양성)
+//   bossBonus : 보스 처치당 +3(이정표)
+export function computePowerScore({ statLevels, waveIndex, runKills, ownedWeapons, runBossKills }) {
+  const statPower = (statLevels?.maxHP || 0) + (statLevels?.atk || 0) + (statLevels?.def || 0);
+  const waveBonus = Math.floor((waveIndex || 0) / 2);
+  const killBonus = Math.floor((runKills || 0) / 20);
+  const weaponBonus = Math.min(4, Math.max(0, (ownedWeapons?.size ?? 1) - 1));
+  const bossBonus = (runBossKills || 0) * 3;
+  return statPower + waveBonus + killBonus + weaponBonus + bossBonus;
+}
+
+// 런 스냅샷({statLevels,waveIndex,runKills,ownedWeapons,runBossKills}) → 진행 단계(1~8).
+// GameState를 그대로 넘기면 필드가 일치해 바로 동작한다. 임계값을 낮은 쪽부터 넘는 만큼 단계 상승.
+export function deriveStage(runSnapshot) {
+  const power = computePowerScore(runSnapshot || {});
+  let stage = 1;
+  for (let i = 1; i < STAGE_THRESHOLDS.length; i++) {
+    if (power >= STAGE_THRESHOLDS[i]) stage = i + 1; else break;
+  }
+  return stage; // 1~8
+}
+
+// 캐릭터 공통 배치/스케일 + 1단계(맨손 시작) 실측 origin을 합친다.
+// 단계 교체 시 CombatScene이 해당 단계의 origin/scale을 런타임에 다시 적용한다.
 export const CHARACTER = {
   displayHeight: 175, // 화면상 텍스처 표시 높이(px). 패딩 포함이라 실제 캐릭은 더 작게 보임
   xRatio: 0.3, // 사이드스크롤 주인공 정석: 좌측 1/3
-  ...CHARACTER_STAGES[CURRENT_STAGE]
+  ...CHARACTER_STAGES[BASE_STAGE]
 };

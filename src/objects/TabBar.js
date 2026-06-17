@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { PALETTE } from '../constants/palette.js';
-import { PIXEL_FONT } from '../constants/fonts.js';
+import { BODY_FONT } from '../constants/fonts.js';
 
 // 합성 허브 하단 4탭 바. 탭 터치(+ 키보드 좌우)로 활성 전환.
 // 실제 탭 기능 로직은 다음 단계 — 여기선 활성 인덱스만 onChange로 통지.
@@ -49,8 +49,8 @@ export default class TabBar extends Phaser.GameObjects.Container {
 
       const label = scene.add
         .text(cx, cy + (icon ? cfg.height * 0.3 : 0), tab.label, {
-          fontFamily: PIXEL_FONT,
-          fontSize: '10px',
+          fontFamily: BODY_FONT, // 한글 탭 라벨(합성/강화/능력치/인벤) — 픽셀폰트 자소 뭉갬, BODY로
+          fontSize: '11px',
           color: '#cbb89a'
         })
         .setOrigin(0.5);
@@ -70,13 +70,18 @@ export default class TabBar extends Phaser.GameObjects.Container {
       this.cells.push({ hl, icon, label, underline, hit });
     });
 
-    // 키보드 접근성: 좌우로 탭 이동
-    scene.input.keyboard?.on('keydown-LEFT', () =>
-      this.setActive((this.active - 1 + this.cells.length) % this.cells.length)
-    );
-    scene.input.keyboard?.on('keydown-RIGHT', () =>
-      this.setActive((this.active + 1) % this.cells.length)
-    );
+    // 키보드 접근성: 좌우로 탭 이동. 핸들러를 참조로 잡아 씬 종료 시 off(누수 방지).
+    // (씬 input.keyboard 리스너는 컨테이너 destroy로 자동 해제되지 않으므로 명시적으로 푼다.)
+    const onLeft = () =>
+      this.setActive((this.active - 1 + this.cells.length) % this.cells.length);
+    const onRight = () =>
+      this.setActive((this.active + 1) % this.cells.length);
+    scene.input.keyboard?.on('keydown-LEFT', onLeft);
+    scene.input.keyboard?.on('keydown-RIGHT', onRight);
+    scene.events.once('shutdown', () => {
+      scene.input.keyboard?.off('keydown-LEFT', onLeft);
+      scene.input.keyboard?.off('keydown-RIGHT', onRight);
+    });
 
     this.refresh();
   }

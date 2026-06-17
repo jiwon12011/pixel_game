@@ -15,14 +15,25 @@
 //   'stats'  — 능력치가 업그레이드됐을 때. CombatScene이 maxHP 증가분을 현재 전투에 반영.
 
 import { WAVE } from '../constants/combat.js';
-import { STAT_UPGRADES } from '../constants/crafting.js';
+import { deriveStage } from '../constants/layout.js';
+import {
+  STAT_UPGRADES,
+  WEAPON_RECIPES,
+  ENHANCE_MAX_LEVEL,
+  ENHANCE_ATK_PER_LEVEL,
+  enhanceCost
+} from '../constants/crafting.js';
 import { MATERIAL_ORDER, freshMaterials } from '../constants/materials.js';
 import {
   freshMeta,
   freshLegacy,
   MEMORY_DECAY,
+  MEMORY_DECAY_FLUSH,
   MEMORY_TIERS,
-  MEMORY_ATTRS
+  MEMORY_ATTRS,
+  PERMANENT_UPGRADES,
+  FIRST_FORGE_MULT,
+  SCAVENGER_COUNT
 } from '../constants/meta.js';
 
 // R5 적기억 스냅샷 — tally(누적 학습)에서 속성별 데미지 배율을 파생한다.
@@ -49,6 +60,11 @@ const RUN_KEY_V1 = 'last-salvage:run:v1'; // 폐기 대상(R7 마이그레이션
 const META_KEY = 'last-salvage:meta:v1';
 const OLD_KEY = 'last-salvage:save:v1'; // 구 단일키(전부 영구) — 마이그레이션 대상
 
+// 이번 런의 속성별 처치 누적(사망 요약 "주력 속성"용). freshMaterials처럼 매 런 새 객체.
+function freshAttrKills() {
+  return { PHYSICAL: 0, SHOCK: 0, PIERCE: 0, FIRE: 0, TOXIC: 0 };
+}
+
 // run 최상위 필드의 base 초기값. resetRun이 이걸로 되돌린 뒤 유산을 주입한다.
 function baseRun() {
   return {
@@ -58,9 +74,16 @@ function baseRun() {
     statLevels: { maxHP: 0, atk: 0, def: 0 },
     ownedWeapons: new Set(['pipe_wrench']),
     equippedWeapon: 'pipe_wrench',
+    // R11 — 무기 강화 레벨(런 한정). id→레벨(0~ENHANCE_MAX_LEVEL). 매 런 새 객체라 사망 시 자동 리셋.
+    weaponLevels: {},
     waveIndex: 0,
     runKills: 0,
-    lastCraftedWeapon: null // 이번 런에 마지막으로 제작한 무기(사망 요약용)
+    runBossKills: 0, // 이번 런 보스 처치 수(런 한정) — deriveStage powerScore bossBonus 신호.
+    runAttrKills: freshAttrKills(), // 속성별 처치 누적 — 사망 요약 "주력 속성"
+    lastCraftedWeapon: null, // 이번 런에 마지막으로 제작한 무기(사망 요약용)
+    // R9 — 웨이브 업그레이드(런 한정 버프). key→레벨/누적값 dict. 매 런 새 객체라
+    // 사망(resetRun→baseRun) 시 자동 초기화. CombatScene이 getModifier로 읽어 적용.
+    runModifiers: {}
   };
 }
 
@@ -98,23 +121,48 @@ const GameState = {
   // ── 드롭 가산 (전투에서 호출) ────────────────────────────────────────
   // delta = { coins, <재료키>:n } 중 들어온 것만. x,y는 줍기 연출용 좌표.
   applyDrop(delta, x, y) {
-    if (delta.coins) this.coins += delta.coins;
+    // R10 coin_rush — 코인 드롭 +20%/lv. 가산 전에 배율 적용하고, 떠오르는 코인 연출(drop 이벤트)도
+    // 실제 획득량과 일치하도록 배율 적용된 값으로 발행한다.
+    let coins = delta.coins || 0;
+    if (coins) coins = Math.floor(coins * this.getCoinMultiplier());
+    if (coins) this.coins += coins;
     for (const k of MATERIAL_ORDER) if (delta[k]) this.materials[k] += delta[k];
     this._markRunDirty();
-    emit('drop', { ...delta, x, y });
+    emit('drop', { ...delta, coins, x, y });
     emit('change');
+  },
+
+  // R10 — coin_rush 레벨에 따른 코인 드롭 배율(1 + 0.20*lv). 중복 산출 방지용 단일 출처.
+  getCoinMultiplier() {
+    return 1 + 0.2 * (this.meta.permanentUpgrades.coin_rush || 0);
   },
 
   // ── 적 처치 누적 → 웨이브 진행 ──────────────────────────────────────
   // killsPerWave마다 waveIndex+1. @returns { waveChanged, waveIndex }.
   addKill() {
     this.runKills += 1;
+    // 현재 장착 무기의 속성에 처치 1 가산(사망 요약 "주력 속성"용).
+    const attr = WEAPON_RECIPES[this.equippedWeapon]?.attrTag;
+    if (attr && this.runAttrKills[attr] != null) this.runAttrKills[attr] += 1;
     const newWave = Math.floor(this.runKills / WAVE.killsPerWave);
     const waveChanged = newWave !== this.waveIndex;
     this.waveIndex = newWave;
     this._markRunDirty();
     emit('change');
     return { waveChanged, waveIndex: this.waveIndex };
+  },
+
+  // ── R9 웨이브 업그레이드(런 한정 버프) ─────────────────────────────────
+  // 5웨이브마다 고른 버프를 누적. 키→레벨(또는 누적값). 같은 버프 재선택 시 레벨++.
+  // 사망 시 baseRun으로 돌아가며 runModifiers={}로 초기화(런 한정 보장).
+  addRunModifier(key, amount = 1) {
+    this.runModifiers[key] = (this.runModifiers[key] || 0) + amount;
+    this._markRunDirty();
+    emit('change');
+  },
+  // 조회 헬퍼 — 미선택 버프는 0. CombatScene 런타임 효과 계산에 쓴다.
+  getModifier(key) {
+    return this.runModifiers[key] || 0;
   },
 
   // ── 능력치 업그레이드 ────────────────────────────────────────────────
@@ -139,10 +187,22 @@ const GameState = {
     }
     return true;
   },
+  // R10 first_forge — 이번 런 첫 합성(lastCraftedWeapon === null)이면 재료 비용을 레벨별로 할인.
+  // 각 재료 Math.ceil(v * [1,0.7,0.5][lv]). craftWeapon 차감/검증과 HubScene 버튼·칩 표시가
+  // 같은 결과를 보게 단일 출처로 노출(canAfford 판정과 실제 차감이 어긋나지 않게).
+  effectiveCraftCost(cost) {
+    const lv = this.meta.permanentUpgrades.first_forge || 0;
+    if (lv <= 0 || this.lastCraftedWeapon !== null) return cost || {};
+    const mult = FIRST_FORGE_MULT[lv];
+    const out = {};
+    for (const k of Object.keys(cost || {})) out[k] = Math.ceil(cost[k] * mult);
+    return out;
+  },
   craftWeapon(weaponId, cost) {
     if (this.ownedWeapons.has(weaponId)) return false;
-    if (!this.canAfford(cost)) return false;
-    for (const k of Object.keys(cost || {})) if (cost[k]) this.materials[k] -= cost[k];
+    const eff = this.effectiveCraftCost(cost); // 첫 합성 할인 반영(차감·검증 일관)
+    if (!this.canAfford(eff)) return false;
+    for (const k of Object.keys(eff)) if (eff[k]) this.materials[k] -= eff[k];
     this.ownedWeapons.add(weaponId);
     this.lastCraftedWeapon = weaponId; // 사망 요약(lastRunSummary)용
     this._markRunDirty();
@@ -159,6 +219,37 @@ const GameState = {
     return true;
   },
 
+  // ── 무기 강화 (런 스코프) ───────────────────────────────────────────────
+  // 무기 atk = 레시피 atkBonus + 강화레벨 × ENHANCE_ATK_PER_LEVEL. 전투 데미지 산출의 단일 출처.
+  getWeaponAtk(weaponId) {
+    return (
+      (WEAPON_RECIPES[weaponId]?.atkBonus || 0) +
+      (this.weaponLevels[weaponId] || 0) * ENHANCE_ATK_PER_LEVEL
+    );
+  },
+
+  // 보유 무기를 1레벨 강화. 보유·레벨캡·재료 확인 후 차감 → 레벨++ → 'change'. 실패 시 false.
+  enhanceWeapon(weaponId) {
+    if (!this.ownedWeapons.has(weaponId)) return false;
+    const level = this.weaponLevels[weaponId] || 0;
+    if (level >= ENHANCE_MAX_LEVEL) return false;
+    const cost = enhanceCost(weaponId, level + 1);
+    if (!this.canAfford(cost)) return false;
+    for (const k of Object.keys(cost)) if (cost[k]) this.materials[k] -= cost[k];
+    this.weaponLevels[weaponId] = level + 1;
+    this._markRunDirty();
+    emit('change');
+    return true;
+  },
+
+  // ── 온보딩 (meta) ────────────────────────────────────────────────────
+  // 첫 탭 공격 성공 1회 호출 — 온보딩 완료 영속(이후 탭 힌트 안 뜸). 멱등(중복 호출 무해).
+  markOnboarded() {
+    if (this.meta.onboarded) return;
+    this.meta.onboarded = true;
+    this.saveMeta();
+  },
+
   // ── 도감 (meta) ──────────────────────────────────────────────────────
   recordCodex(weaponId) {
     const list = this.meta.codex.discoveredRecipes;
@@ -170,13 +261,62 @@ const GameState = {
   // ── 직전 런 요약 (사망 확정 시 1회 — meta 영속) ───────────────────────
   // 사망 오버레이가 RUN #N과 함께 표시한다. run 리셋 전에 호출해야 값이 살아있다.
   recordRunSummary() {
+    // R8 — 잔해 포인트 산출(사망 확정 1회 호출 지점).
+    //   기본 5 + 처치 5당 1 + 웨이브당 3 + 무기 제작 보너스 5.
+    let earn =
+      5 +
+      Math.floor(this.runKills / 5) +
+      this.waveIndex * 3 +
+      (this.lastCraftedWeapon ? 5 : 0);
+    // R10 salvage_rate — SP 적립 +15%/lv(산출 직후 배율). floor로 정수 유지.
+    earn = Math.floor(earn * (1 + 0.15 * (this.meta.permanentUpgrades.salvage_rate || 0)));
+
+    // SP 무한증식 차단: 여기서 salvagePoints에 더하지 않고 pendingSp에 "대기"만 시킨다.
+    // 실제 적립은 다음 런 시작(startNewRun)에서 1회 확정. 사망 화면에서 새로고침해
+    // 다음 런으로 넘어가지 않으면 미확정(미적립) — 의도된 안전(런 미확정 = SP 미지급).
+    this.meta.pendingSp = earn;
+    // 죽은 런을 닫는다 — 부팅 resume이 이 런(죽은 웨이브)을 풀피로 부활시키지 않게 차단(load 참조).
+    this.meta.runClosed = true;
+
+    // 이번 런 최종 도달 단계 — 런 리셋 전이라 GameState 스냅샷이 그대로 유효하다(deriveStage가 this를 읽음).
+    // 역대 최고(bestStage)는 갱신만(내려가지 않음). 사망 오버레이가 "이번 N / 역대 M"을 표시.
+    const runStage = deriveStage(this);
+    if (runStage > (this.meta.bestStage || 1)) this.meta.bestStage = runStage;
+
     this.meta.lastRunSummary = {
       kills: this.runKills,
       maxWave: this.waveIndex,
       coins: this.coins,
-      lastCraftedWeapon: this.lastCraftedWeapon
+      stage: runStage, // 이번 런 최고 단계(사망 오버레이용)
+      attrKills: { ...this.runAttrKills }, // 속성별 처치 스냅샷(주력 속성 표시용)
+      lastCraftedWeapon: this.lastCraftedWeapon,
+      spEarned: earn // 사망 오버레이 "+N 잔해 포인트" 표시용
     };
     this.saveMeta();
+  },
+
+  // ── R8 영구 업그레이드 구매 (강화 보드) ───────────────────────────────
+  // SP 충분 & 미최대면: SP 차감 + 레벨++/플래그 true, saveMeta, 'change' 발행 → true.
+  // 부족·최대·미정의 키면 → false. flag형은 boolean, level형은 정수 레벨.
+  buyPermanentUpgrade(key) {
+    const def = PERMANENT_UPGRADES[key];
+    if (!def) return false;
+    const cur = this.meta.permanentUpgrades[key];
+    const level = def.flag ? (cur ? 1 : 0) : cur || 0;
+    if (level >= def.maxLevel) return false; // 이미 최대/해금됨
+    const cost = def.costs[level]; // 다음 레벨 비용
+    if (this.meta.salvagePoints < cost) return false;
+    this.meta.salvagePoints -= cost;
+    this.meta.permanentUpgrades[key] = def.flag ? true : level + 1;
+    this.saveMeta();
+    emit('change');
+    return true;
+  },
+
+  // 재료 추가 드롭 확률 — '잔해 수집기'(구 scrap_magnet) 레벨당 +25%. 자동 획득 전환으로
+  // 줍기 반경이 무의미해져 재해석: onEnemyKilled가 재료 종별로 이 확률만큼 +1 추가 드롭.
+  getMaterialDropChance() {
+    return 0.25 * (this.meta.permanentUpgrades.scrap_magnet || 0);
   },
 
   // ── 유산/런 사이클 ───────────────────────────────────────────────────
@@ -189,6 +329,18 @@ const GameState = {
   // 최상위 run 필드를 base로 되돌린 뒤 legacy(있으면) 주입. saveRun까지.
   resetRun(legacy) {
     Object.assign(this, baseRun());
+    const pu = this.meta.permanentUpgrades;
+    // R8 — 영구 업글 'starting_coins'(레벨당 +8 코인)를 base 위에 주입. legacy 주입 전이라 코인 유산과 가산.
+    this.coins += (pu.starting_coins || 0) * 8;
+    // R10 — 시작 스탯 강화: 강화 골격(maxHP +15/lv) · 전투 본능(atk +4/lv). base 위에 가산.
+    this.stats.maxHP += (pu.iron_bones || 0) * 15;
+    this.stats.atk += (pu.battle_instinct || 0) * 4;
+    // R10 선발굴 — 시작 시 MATERIAL_ORDER에서 랜덤으로 N개(레벨별 0/2/4/6) 뽑아 보유 재료에 가산.
+    const scav = SCAVENGER_COUNT[pu.scavenger_start || 0] || 0;
+    for (let i = 0; i < scav; i++) {
+      const k = MATERIAL_ORDER[Math.floor(Math.random() * MATERIAL_ORDER.length)];
+      this.materials[k] += 1;
+    }
     if (legacy && legacy.type) this.applyLegacy(legacy);
     // R5 내성 스냅샷 — 이 시점의 (startNewRun에서 이미 감쇠된) tally로 고정.
     this.runResistance = deriveResistance(this.meta.enemyMemory.tally);
@@ -225,6 +377,13 @@ const GameState = {
 
   // 새 런 시작: meta.legacy 소비 → resetRun → runCount++. 적기억 tally 감쇠도 여기서.
   startNewRun() {
+    // 직전 런(사망 확정)의 대기 SP를 이 시점에 1회 확정 적립 — recordRunSummary는 적립을 미루므로
+    // "다음 런으로 넘어감 = 직전 런 확정"이 SP 지급 시점이다(사망→새로고침은 미적립). 소비 후 0.
+    if (this.meta.pendingSp) {
+      this.meta.salvagePoints += this.meta.pendingSp;
+      this.meta.pendingSp = 0;
+    }
+    this.meta.runClosed = false; // 새 런 정상 시작 — 닫힘 해제(아래 saveMeta로 영속)
     this.decayEnemyMemory(); // R5 내성 계산 전, 과거 학습을 절반 감쇠해두기(적용만)
     const legacy = this.meta.legacy;
     this.resetRun(legacy && legacy.type ? legacy : null);
@@ -237,8 +396,10 @@ const GameState = {
 
   // 적기억 tally floor(*0.5) 감쇠 — R5 내성 계산용 누적치 관리.
   decayEnemyMemory() {
+    // R8 — 'memory_flush' 해금 시 감쇠 비율을 0.7로(더 잘 잊음 = 내성 쌓이기 어려움).
+    const rate = this.meta.permanentUpgrades.memory_flush ? MEMORY_DECAY_FLUSH : MEMORY_DECAY;
     const t = this.meta.enemyMemory.tally;
-    for (const k of Object.keys(t)) t[k] = Math.floor(t[k] * MEMORY_DECAY);
+    for (const k of Object.keys(t)) t[k] = Math.floor(t[k] * rate);
   },
 
   // ── run 저장 디바운스 ────────────────────────────────────────────────
@@ -298,9 +459,13 @@ const GameState = {
           statLevels: this.statLevels,
           ownedWeapons: [...this.ownedWeapons],
           equippedWeapon: this.equippedWeapon,
+          weaponLevels: this.weaponLevels,
           waveIndex: this.waveIndex,
           runKills: this.runKills,
-          lastCraftedWeapon: this.lastCraftedWeapon
+          runBossKills: this.runBossKills,
+          runAttrKills: this.runAttrKills,
+          lastCraftedWeapon: this.lastCraftedWeapon,
+          runModifiers: this.runModifiers
         })
       );
     } catch {
@@ -320,7 +485,10 @@ const GameState = {
     this.loadMeta(); // 영구 메타 먼저
     this.migrateOldSave(); // 구 단일키 → 도감 씨앗 이관(메타 비었을 때만) + 구키 제거
     this.dropV1Run(); // R7 — parts 기반 v1 런 폐기(meta는 보존, 1:1 환산 안 함)
-    this.loadRun(); // 진행 중이던 런(없으면 base 유지)
+    // 사망으로 닫힌 런(runClosed)은 복원하지 않는다 — 죽은 런이 풀피로 부활하는
+    // 새로고침 익스플로잇 차단. 닫힌 런 세이브는 제거하고 base로 시작(다음 startNewRun이 새 런 기록).
+    if (this.meta.runClosed) this.dropClosedRun();
+    else this.loadRun(); // 진행 중이던 런(없으면 base 유지)
     // 부팅 resume 경로는 startNewRun/resetRun을 안 거친다 → 여기서 스냅샷을 잡아야
     // 이어하는 런에도 유효한 내성이 적용된다(로드된 tally 기준).
     this.runResistance = deriveResistance(this.meta.enemyMemory.tally);
@@ -333,6 +501,12 @@ const GameState = {
       const d = JSON.parse(raw);
       const m = freshMeta();
       m.runCount = d.runCount ?? m.runCount;
+      m.onboarded = d.onboarded ?? false; // 온보딩 완료 플래그(구 세이브엔 없으면 false — 첫 탭 힌트 노출)
+      m.salvagePoints = d.salvagePoints ?? 0; // R8 — 영구 화폐(구 세이브엔 없으면 0)
+      m.pendingSp = d.pendingSp ?? 0;         // 대기 SP(구 세이브엔 없으면 0 — 폴백)
+      m.runClosed = d.runClosed ?? false;     // 닫힌 런 플래그(구 세이브엔 없으면 false — 폴백)
+      m.bestStage = d.bestStage ?? 1;         // 역대 최고 단계(구 세이브엔 없으면 1 — 폴백)
+      if (d.permanentUpgrades) m.permanentUpgrades = { ...m.permanentUpgrades, ...d.permanentUpgrades };
       if (d.legacy) m.legacy = { ...m.legacy, ...d.legacy };
       if (Array.isArray(d.codex?.discoveredRecipes)) {
         m.codex.discoveredRecipes = [...new Set(d.codex.discoveredRecipes)];
@@ -357,9 +531,13 @@ const GameState = {
       if (Array.isArray(d.ownedWeapons)) this.ownedWeapons = new Set(d.ownedWeapons);
       this.ownedWeapons.add('pipe_wrench'); // 기본 무기는 항상 보유
       this.equippedWeapon = d.equippedWeapon ?? this.equippedWeapon;
+      this.weaponLevels = { ...(d.weaponLevels || {}) }; // 구 세이브엔 없으면 빈 객체(폴백)
       this.waveIndex = d.waveIndex ?? 0;
       this.runKills = d.runKills ?? 0;
+      this.runBossKills = d.runBossKills ?? 0; // 구 세이브엔 없으면 0(폴백)
+      this.runAttrKills = { ...freshAttrKills(), ...(d.runAttrKills || {}) };
       this.lastCraftedWeapon = d.lastCraftedWeapon ?? null;
+      this.runModifiers = { ...(d.runModifiers || {}) };
     } catch {
       /* 손상된 런 세이브 — base로 진행 */
     }
@@ -373,6 +551,19 @@ const GameState = {
     } catch {
       /* noop — 제거 실패해도 v2 로드엔 영향 없음 */
     }
+  },
+
+  // 사망으로 닫힌 런 처리(부팅) — 죽은 런 세이브를 제거하고 runClosed 플래그를 내려
+  // base 런으로 깨끗이 시작한다. pendingSp는 그대로 둔다(미확정 — 새 런 사망 시 recordRunSummary가
+  // 덮어쓰며, 실제 적립은 startNewRun에서만). 즉 사망 후 새로고침은 SP 미적립 + 런 미부활이 보장된다.
+  dropClosedRun() {
+    try {
+      localStorage.removeItem(RUN_KEY);
+    } catch {
+      /* noop — 제거 실패해도 loadRun을 건너뛰므로 죽은 런이 복원되진 않음 */
+    }
+    this.meta.runClosed = false;
+    this.saveMeta();
   },
 
   // 마이그레이션: 구 v1은 전부 영구 저장 구조였다. 로그라이크(런/메타 분리)로 모델이

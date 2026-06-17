@@ -24,20 +24,20 @@ export const PLAYER = {
 // ── 무기 손표시 (R7 #6) ─────────────────────────────────────────────────
 // stage_01은 맨손이라 장착 무기 아이콘을 손 근처에 오버레이한다. 헤드리스라 정확한
 // 손 픽셀 위치는 모르므로 추정값 — 육안 튜닝 전제로 여기 상수만 만지면 된다.
-//   offsetX     — 캐릭터 몸 중심(playerX≈108) 기준 가로(+ = 전방/오른쪽). 손이 앞으로 나온 위치.
-//                 캐릭터 몸 우측 실루엣이 x≈150이라, 무기를 전방으로 충분히 내밀어야 몸에
-//                 안 묻히고 배경과 겹쳐 또렷이 보인다(과거 18은 몸 한복판이라 묻혔음).
+//   offsetX     — 캐릭터 몸 중심(playerX≈108) 기준 가로(+ = 전방/오른쪽). 늘어뜨린 오른팔 손 위치.
+//                 28은 옆구리에 내린 손에 맞춰 몸쪽으로 붙인다(42는 손에서 떨어져 들려 보였음).
 //   heightRatio — groundY(발끝)에서 위로 charDisplayH*ratio 지점이 손 높이. 0=발, 1=머리끝.
+//                 idle 포즈는 팔을 내려 손이 허리~허벅지 높이라 0.40. (0.58은 어깨라 등에 뜬 듯 보였음)
 //   offsetY     — 손 높이 미세 보정 px(+아래).
-//   displaySize — 화면상 무기 표시 높이 px(원본 128 webp에서 스케일 산출). 30은 너무 작아 묻혔음.
-//   angle       — 무기 기울기(°). 아이콘이라 살짝 기울여 쥔 느낌만.
+//   displaySize — 화면상 무기 표시 높이 px(원본 128 webp에서 스케일 산출). 48은 내린 손에 쥔 톤.
+//   angle       — 무기 기울기(°). -16은 휘두름이 아니라 손에 쥐고 비스듬히 내린 자세 각도.
 //   depthOffset — parallax.topDepth 기준 깊이 가산(캐릭터=+1보다 확실히 위, HUD=50+보단 아래).
 export const WEAPON_HAND = {
-  offsetX: 42,
-  heightRatio: 0.42,
-  offsetY: 0,
-  displaySize: 54,
-  angle: -22,
+  offsetX: 28,
+  heightRatio: 0.40,
+  offsetY: 2,
+  displaySize: 64,
+  angle: -16,
   depthOffset: 5
 };
 
@@ -106,6 +106,12 @@ export const WAVE = {
   killsPerWave: 10
 };
 
+// 드롭 연출 — 한 처치에서 복수 재료가 동시에 떨어질 때 팝 좌표를 가로로 흩뿌리는 폭(±px).
+// 자동획득 전환 후 남은 유일한 줍기 상수(구 PICKUPS에서 이관, 나머지 줍기 값은 폐기).
+export const DROP = {
+  spreadX: 20
+};
+
 // waveIndex(w) → 그 웨이브의 스폰/체력/보상 파라미터.
 // 공식은 ideator 확정값. cap으로 후반 난이도가 발산하지 않게 묶는다.
 export function waveParams(w) {
@@ -115,6 +121,60 @@ export function waveParams(w) {
     intervalMax: Math.max(1100, 2600 - w * 80),
     maxAlive: Math.min(6, 3 + Math.floor(w / 4)),
     dropMult: Math.min(1.8, 1.0 + w * 0.04)
+  };
+}
+
+// ── 보스 (10웨이브마다 인카운터) ─────────────────────────────────────────
+// 일반 적과 같은 Enemy 인프라를 재사용한다(typeKey=보스키 + cfg.def/maxHP 주입).
+// HP가 매우 높고·느리고·크다(스케일은 displayHeight로 산출 — 일반 적 108~145의 ~1.7배).
+// 등장 순서: 10=colossus, 20=herald, 30=colossus … (bossKeyForWave가 번갈아 반환).
+//   reward — 처치 보상. 희귀 재료(grade≥2) 2~3종 확정 + 코인. 코인은 보스 깊이로 가산(scene).
+export const BOSS_TYPES = {
+  // 콜로서스 — 느리지만 압도적으로 단단·묵직한 일격. 첫 보스(웨이브 10).
+  colossus_boss: {
+    maxHP: 760,
+    speed: 15,
+    damage: 24,
+    attackCooldown: 1700,
+    displayHeight: 232, // 일반 적의 ~1.7배 — 화면을 채우는 실루엣
+    contactRange: 118,
+    name: '콜로서스',
+    reward: { coins: 140, materials: { scrap_metal_plate: 3, old_battery_cell: 2, broken_circuit_board: 1 } }
+  },
+  // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 20).
+  the_herald_boss: {
+    maxHP: 600,
+    speed: 23,
+    damage: 19,
+    attackCooldown: 1250,
+    displayHeight: 216,
+    contactRange: 110,
+    name: '헤럴드',
+    reward: { coins: 160, materials: { chemical_vial: 2, broken_circuit_board: 2, old_battery_cell: 2 } }
+  }
+};
+
+// 보스 등장 웨이브 → 보스 키. 10→colossus, 20→herald, 30→colossus … (tier 홀짝으로 번갈아).
+export function bossKeyForWave(w) {
+  const tier = Math.floor(w / 10); // 10→1, 20→2 …
+  return tier % 2 === 1 ? 'colossus_boss' : 'the_herald_boss';
+}
+
+// 보스 등장 웨이브 → { key, def, tier, maxHP, damage }.
+// HP는 보스 베이스에 (waveParams.hpMult + 0.6·tier)를 곱해 잡몹 강화 곡선과 결을 맞추되,
+// hpMult가 캡(2.8)에 닿은 뒤에도 깊은 보스가 계속 단단해지도록 tier 가산항을 더한다.
+// damage는 tier마다 +12%로 완만히(즉사 방지). tier: 10→0, 20→1, 30→2 …
+export function bossStatsForWave(w) {
+  const key = bossKeyForWave(w);
+  const base = BOSS_TYPES[key];
+  const tier = Math.max(0, Math.floor(w / 10) - 1);
+  const hpMult = waveParams(w).hpMult + 0.6 * tier;
+  return {
+    key,
+    def: base,
+    tier,
+    maxHP: Math.round(base.maxHP * hpMult),
+    damage: Math.round(base.damage * (1 + 0.12 * tier))
   };
 }
 
@@ -166,7 +226,7 @@ export const MOTION = {
   lungeX: 22,               // 앞으로 이동 px
   lungeScaleX: 1.14,        // 가로 늘어나기 (스트레치)
   lungeScaleY: 0.87,        // 세로 쪼그라들기
-  recoveryMs: 120,          // 원위치 복귀
+  recoveryMs: 120,          // 캐릭터 원위치 복귀 — chopRecoveryMs(150)보다 30ms 짧아 캐릭터가 먼저 제자리에 안착
 
   // ── 히트스톱 ─────────────────────────────────────────────────────────
   // director.update를 일시 중단해 이동/공격 타이밍만 순간 정지(트윈 연출은 계속 진행).
@@ -262,11 +322,23 @@ export const MOTION = {
   equipAngleDelta: -14,       // 장착 순간 추가 기울기 ° (WEAPON_HAND.angle 기준 오프셋, 복귀)
   equipFlourishMs: 200,       // 스케일 팝 + 각도 복귀 duration ms
 
-  // ── 런지 무기 스윙 (R7 motion) ───────────────────────────────────────────
-  // 런지 정점에서 무기를 살짝 전방으로 휘둘러 복귀. position은 update()가 처리하므로
-  // angle만 건드리면 된다. 누수 없음 — 모든 트윈이 onComplete에서 체인/종료.
-  lungeWeaponAngleDelta: 20,  // 런지 시 전방 스윙 추가 각도 °
-  lungeWeaponSwingMs: 80,     // 스윙 forward duration ms (lungeMs 55와 함께)
+  // ── 오버헤드 찹 무기 연출 ────────────────────────────────────────────────────
+  // 각도 기준: Phaser CCW=음수, CW=양수. WEAPON_HAND.angle(-16°) 는 헤드가 살짝 올라간 정지 포즈.
+  //   chopWindupAngle(-108°): CCW로 크게 돌려 헤드를 머리 위-뒤로 치켜든다.
+  //   chopImpactAngle(+52°):  CW로 빠르게 돌려 헤드를 아래-앞으로 내려찍는다.
+  //   호(arc) = -108 → +52 = 160° 큰 스윙으로 "오버헤드" 체감.
+  // chopWindupMs는 anticipationMs(70)와, chopImpactMs는 lungeMs(55)와 동기화 —
+  //   캐릭터 예비동작과 무기 치켜들기가, 런지와 내려찍기가 같은 타이밍에 끝난다.
+  chopWindupAngle: -108,       // 치켜든 각도 ° (CCW, 절대값; 헤드 상향)
+  chopWindupOffsetY: -24,      // 치켜드는 동안 y 오프셋 px — 음수=위(손 올라감 강조)
+  chopWindupMs: 70,            // windup duration ms (= anticipationMs, 동기)
+  chopImpactAngle: 52,         // 내려찍기 각도 ° (CW, 절대값; 헤드 하향)
+  chopImpactOffsetY: 5,        // 임팩트 y 오프셋 px — 살짝 아래로(충격 진동감)
+  chopImpactMs: 55,            // 내려찍기 duration ms (= lungeMs, 동기) / Expo.in 가속
+  chopRecoveryMs: 150,         // 무기 각도/offsetY 복귀 — recoveryMs(120)보다 30ms 더 길어 캐릭터가 먼저 안착하고 무기가 살짝 뒤따라 내려오는 "여운" 의도(동기화 원하면 120으로 통일)
+  // ── 임팩트 보강 ──────────────────────────────────────────────────────────
+  chopShakeIntensity: 0.0035,  // cameras.main.shake 강도 (0.003~0.005 권고, 과하면 멀미)
+  chopShakeMs: 70,             // 셰이크 duration ms
 
   // ── 재료 줍기 팝 강화 (R7 motion) ───────────────────────────────────────
   // 기존 상승+페이드에 스케일 팝 + 포물선 X 드리프트 추가.

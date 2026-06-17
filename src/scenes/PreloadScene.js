@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { IMAGE_MANIFEST, WEAPON_MANIFEST } from '../assets/manifest.js';
 import { LOGICAL } from '../constants/layout.js';
 import { PALETTE } from '../constants/palette.js';
-import { PIXEL_FONT, PRELOAD_FONTS } from '../constants/fonts.js';
+import { PIXEL_FONT, BODY_FONT, PRELOAD_FONTS, installCrispText } from '../constants/fonts.js';
 import GameState from '../state/GameState.js';
 
 // 에셋 프리로드 + 폰트 준비 → 준비되면 Combat/Hub 두 씬을 동시에 가동.
@@ -12,6 +12,7 @@ export default class PreloadScene extends Phaser.Scene {
   }
 
   preload() {
+    installCrispText(this); // 모든 텍스트 2배 해상도 + 정수좌표(한글 선명화)
     this.drawLoadingUI();
 
     IMAGE_MANIFEST.forEach(({ key, url }) => this.load.image(key, url));
@@ -81,8 +82,8 @@ export default class PreloadScene extends Phaser.Scene {
 
     this.add
       .text(cx, cy - 14, '폐품을 끌어모으는 중…', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '10px',
+        fontFamily: BODY_FONT, // 한글 안내문 — 픽셀폰트 10px 자소 뭉갬, BODY 11px로 가독성 ↑
+        fontSize: '11px',
         color: '#9a8b78'
       })
       .setOrigin(0.5);

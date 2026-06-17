@@ -11,15 +11,18 @@ export default class Enemy {
    * @param {Phaser.Scene} scene
    * @param {object} cfg { typeKey, x, groundY, depth, motionOk, onDeath }
    */
-  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath, hpMult = 1 }) {
+  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath, hpMult = 1, def = null, maxHP = null, isBoss = false }) {
     this.scene = scene;
     this.typeKey = typeKey;
-    this.def = ENEMY_TYPES[typeKey];
+    // 보스는 ENEMY_TYPES에 없으므로 cfg.def로 스탯을 주입받는다(잡몹은 룩업 그대로).
+    this.def = def || ENEMY_TYPES[typeKey];
+    this.isBoss = isBoss;
     this.motionOk = motionOk;
     this.onDeath = onDeath;
 
     // 웨이브 에스컬레이션 — 최대 HP만 배율(데미지/속도는 그대로 둬 체감 난이도 통제).
-    this.maxHP = Math.max(1, Math.round(this.def.maxHP * hpMult));
+    // 보스는 깊이 스케일이 이미 반영된 maxHP를 직접 주입받는다(hpMult 미적용).
+    this.maxHP = maxHP != null ? maxHP : Math.max(1, Math.round(this.def.maxHP * hpMult));
     this.hp = this.maxHP;
     this.speed = this.def.speed;
 
@@ -34,6 +37,13 @@ export default class Enemy {
     this.shakeX = 0;
     this.shakeY = 0;
     this.bobY = 0;     // 이동 중 상하 bob offset — syncPosition에서 합산
+
+    // 피격 셰이크/플래시 — TimerEvent 없이 update의 상태기반 클럭으로 진행(perf: 타격당 delayedCall 0).
+    this.shakeActive = false; // 셰이크 계단 진행 중 → _tickShake가 매 프레임 shakeX 갱신
+    this.shakeClock = 0;      // 셰이크 누적 시간(ms)
+    this.flashActive = false; // tint 플래시(white→red→restore) 진행 중 → _tickFlash가 처리
+    this.flashClock = 0;      // 플래시 누적 시간(ms)
+    this._flashRedApplied = false; // 45ms 시점 붉은 tint 1회 적용 가드
 
     // 감전(전기충격 렌치 메카닉) 상태 — speed/attackCooldown 일시 디버프.
     this.speedMult = 1;       // update 이동에 곱해짐
@@ -54,6 +64,8 @@ export default class Enemy {
     // DoT 연출 전용 필드 — setDotTint/clearDot/die/destroy에서 일괄 정리.
     this._dotPulseTween = null;  // repeat:-1 tween 참조 → .stop()으로 누수 없이 제거
     this._dotTintLocked = false; // flashHit 진행 중 true → dot onUpdate가 tint 건드리지 않음
+    this._dotTintSteps = null;   // 사전계산 보간색 배열(onUpdate에서 Math 연산 없이 룩업)
+    this._dotStepIdx = -1;       // 마지막 적용 색 인덱스 — 동일 인덱스면 setTint 생략. -1=강제 재적용
 
     const src = scene.textures.get(typeKey).getSourceImage();
     const scale = this.def.displayHeight / src.height;
@@ -84,6 +96,12 @@ export default class Enemy {
       .setOrigin(0, 0.5);
 
     this.container.add([this.shadow, this.sprite, this.hpBg, this.hpFill]);
+
+    // 보스는 머리 위 작은 HP바를 숨긴다 — 화면 상단의 큰 보스 HP바(scene)가 대신한다.
+    if (isBoss) {
+      this.hpBg.setVisible(false);
+      this.hpFill.setVisible(false);
+    }
 
     // ── 스폰 페이드인 ─────────────────────────────────────────────────
     if (motionOk) {
@@ -125,7 +143,39 @@ export default class Enemy {
     } else {
       this.inRange = true; // 사거리 진입 → director가 근접 공격 처리
     }
+    // 피격 셰이크/플래시 — 상태기반 진행(TimerEvent 0). 매 프레임 cheap한 분기뿐.
+    if (this.shakeActive || this.flashActive) {
+      const dtMs = dt * 1000;
+      if (this.shakeActive) this._tickShake(dtMs);
+      if (this.flashActive) this._tickFlash(dtMs);
+    }
     this.syncPosition();
+  }
+
+  // 셰이크 계단 진행 — 누적 시간으로 shakeOffsets 단계를 직접 인덱싱(프레임 드랍에도 정확).
+  // 마지막 단계 통과 시 shakeX=0으로 정착하고 비활성화. delayedCall 루프 대체(perf).
+  _tickShake(dtMs) {
+    this.shakeClock += dtMs;
+    const step = Math.floor(this.shakeClock / MOTION.shakeStepMs);
+    if (step >= MOTION.shakeOffsets.length) {
+      this.shakeActive = false;
+      this.shakeX = 0;
+      return;
+    }
+    this.shakeX = MOTION.shakeOffsets[step];
+  }
+
+  // tint 플래시 진행 — white(즉시) → 45ms 붉은 잔상 → 155ms 상태복원. delayedCall 2개 대체.
+  _tickFlash(dtMs) {
+    this.flashClock += dtMs;
+    if (this.flashClock >= 155) {
+      this.flashActive = false;
+      this._dotTintLocked = false; // 잠금 해제 → dot 맥동 트윈이 다음 프레임 재개
+      this.restoreTint();          // 감전·DoT 상태 반영해 복원
+    } else if (this.flashClock >= 45 && !this._flashRedApplied) {
+      this._flashRedApplied = true;
+      this.sprite.setTint(COMBAT_COLORS.hitTint);
+    }
   }
 
   /** 근접 공격 주기(ms) — 감전 중이면 늘어나 더 느리게 때린다. */
@@ -202,12 +252,23 @@ export default class Enemy {
       return;
     }
 
-    // RGB 채널 분해 — onUpdate에서 매 프레임 재계산 안 하려고 미리 뽑아둠
+    // [perf] 사전계산 보간색 — 0xffffff(변화없음)→baseColor를 STEPS+1단계로 한 번만 구워둔다.
+    // onUpdate는 Math 연산 없이 인덱스 룩업 + (인덱스가 바뀔 때만) setTint → 여러 마리 동시에도 가볍다.
+    const STEPS = 8;
     const tr = (baseColor >> 16) & 0xff;
     const tg = (baseColor >> 8) & 0xff;
     const tb = baseColor & 0xff;
+    const palette = new Array(STEPS + 1);
+    for (let i = 0; i <= STEPS; i++) {
+      const t = i / STEPS;
+      const r = Math.round(255 + (tr - 255) * t);
+      const g = Math.round(255 + (tg - 255) * t);
+      const b = Math.round(255 + (tb - 255) * t);
+      palette[i] = (r << 16) | (g << 8) | b;
+    }
+    this._dotTintSteps = palette;
+    this._dotStepIdx = -1; // 새 맥동 — 첫 onUpdate에서 강제 적용
 
-    // 헬퍼 0→1 보간 tween (setTint는 정수 4개 세팅 수준 — 매 프레임 호출해도 cheap)
     const helper = { v: 0 };
     this._dotPulseTween = this.scene.tweens.add({
       targets: helper,
@@ -219,12 +280,10 @@ export default class Enemy {
       onUpdate: () => {
         // 사망·피격플래시·감전 구간엔 건너뜀 — 각 상태가 tint를 소유함
         if (this.dead || this._dotTintLocked || this.shocked) return;
-        const t = helper.v;
-        // 0xffffff(변화없음) → baseColor 선형 보간
-        const r = Math.round(255 + (tr - 255) * t);
-        const g = Math.round(255 + (tg - 255) * t);
-        const b = Math.round(255 + (tb - 255) * t);
-        this.sprite.setTint((r << 16) | (g << 8) | b);
+        const idx = Math.round(helper.v * STEPS);
+        if (idx === this._dotStepIdx) return; // 같은 보간색 — setTint 생략
+        this._dotStepIdx = idx;
+        this.sprite.setTint(palette[idx]);
       }
     });
   }
@@ -238,7 +297,9 @@ export default class Enemy {
       this.sprite.setTint(COMBAT_COLORS.shock);
     } else if (this.dotType) {
       if (this._dotPulseTween) {
-        // motionOk: 맥동 tween이 매 프레임 tint를 담당 → 별도 조치 불필요
+        // motionOk: 맥동 tween이 tint를 담당. 단 플래시/감전 구간엔 색이 멈춰 있었으므로
+        // 인덱스를 무효화해 다음 onUpdate가 반드시 현재 보간색을 재적용하게 한다(index-skip 보정).
+        this._dotStepIdx = -1;
       } else {
         // reduced-motion: flashHit/clearShock 이후 정적 tint 재적용
         const c = this.dotType === 'burn' ? COMBAT_COLORS.burnGlow : COMBAT_COLORS.toxicGlow;
@@ -274,38 +335,27 @@ export default class Enemy {
 
   // [모션 훅] 피격 플래시 — white→red 두 단계 tint (텍스처 스왑/blend 금지).
   // 셰이크: shakeX 계단식 감쇠 오실레이션 + shakeY 짧은 반동.
+  //
+  // [perf] tint 2단계 + 셰이크 7단계를 모두 delayedCall(타격당 9개)이 아니라
+  // update의 상태기반 클럭(_tickFlash/_tickShake)으로 처리한다 → TimerEvent 할당 0.
+  // shakeY만 단일 트윈(Phaser 내부 풀 재사용). 빠른 연타 시 클럭이 리셋돼 자연 재플래시.
   flashHit() {
-    // 임팩트 순간 흰색 플래시, 이후 붉은 잔상, 마지막 클리어
-    // (모든 delayedCall 반환값을 _timers에 저장 → destroy/die에서 유령 타이머 정리)
+    // tint 플래시 시작 — white 즉시 적용 후 _tickFlash가 45ms 붉은 잔상 → 155ms 복원.
     this._dotTintLocked = true; // DoT 맥동 onUpdate를 일시 잠금 — 피격 플래시가 우선
+    this._dotStepIdx = -1;      // 잠금 해제 후 dot 맥동이 색을 강제 재적용하도록
+    this.flashActive = true;
+    this.flashClock = 0;
+    this._flashRedApplied = false;
     this.sprite.setTint(0xffffff);
-    this._timers.push(
-      this.scene.time.delayedCall(45, () => {
-        if (!this.dead) this.sprite.setTint(COMBAT_COLORS.hitTint);
-      })
-    );
-    this._timers.push(
-      this.scene.time.delayedCall(155, () => {
-        this._dotTintLocked = false; // 잠금 해제 → dot 맥동 트윈이 다음 프레임에 재개
-        if (!this.dead) this.restoreTint(); // 감전·DoT 상태 반영해 복원
-      })
-    );
 
     if (!this.motionOk) return;
 
-    // 계단식 감쇠 오실레이션 shakeX — 각 step마다 즉시 적용해 레트로 계단 감성
-    MOTION.shakeOffsets.forEach((offset, i) => {
-      this._timers.push(
-        this.scene.time.delayedCall(i * MOTION.shakeStepMs, () => {
-          if (!this.dead) {
-            this.shakeX = offset;
-            this.syncPosition();
-          }
-        })
-      );
-    });
+    // 계단식 감쇠 오실레이션 shakeX — _tickShake가 누적 시간으로 단계를 밟는다.
+    this.shakeActive = true;
+    this.shakeClock = 0;
+    this.shakeX = MOTION.shakeOffsets[0];
 
-    // shakeY 위로 살짝 튕겼다 복귀
+    // shakeY 위로 살짝 튕겼다 복귀 (단일 트윈)
     this.shakeY = -MOTION.shakeYAmplitude;
     this.scene.tweens.add({
       targets: this,

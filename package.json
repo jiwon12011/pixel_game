@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview --port 4173",
     "optimize:bg": "node scripts/optimize-bg.mjs",
+    "optimize:variants": "node scripts/optimize-variants.mjs",
     "optimize:assets": "node scripts/optimize-assets.mjs"
   },
   "dependencies": {

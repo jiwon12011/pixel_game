@@ -40,6 +40,8 @@ export default class CombatDirector {
     this.spawnAccum = 0;
     this.nextSpawnIn = SPAWN.firstDelay;
     this.playerAtkCd = 0;
+    // 보스전 동안 true — 일반 적 스폰을 멈춰 보스에 집중하게 한다(scene이 토글).
+    this.suppressSpawn = false;
   }
 
   start() {
@@ -50,14 +52,36 @@ export default class CombatDirector {
     this.running = false;
   }
 
-  /** 진행 중인 적 전부 즉시 제거(주인공 사망/리셋 시). */
+  /** 진행 중인 적 전부 즉시 제거(주인공 사망/리셋 시). 보스 상태 플래그도 초기화. */
   clearAll() {
     this.enemies.forEach((e) => e.destroy());
     this.enemies = [];
+    this.suppressSpawn = false;
+  }
+
+  // 보스 1체 스폰 — 잡몹과 같은 Enemy 인프라를 쓰되 def/maxHP를 주입하고 isBoss로 표시한다.
+  // 우측 밖에서 등장(일반 적과 동선 동일). 잡몹보다 살짝 앞 깊이로 렌더. 반환값으로 scene이 HP바를 묶는다.
+  spawnBoss({ typeKey, def, maxHP, onDeath }) {
+    const boss = new Enemy(this.scene, {
+      typeKey,
+      def,
+      maxHP,
+      isBoss: true,
+      x: LOGICAL.width + SPAWN.offRightX,
+      groundY: this.groundY,
+      depth: this.depth + 0.2,
+      motionOk: this.motionOk,
+      onDeath
+    });
+    this.enemies.push(boss);
+    return boss;
   }
 
   aliveCount() {
-    return this.enemies.filter((e) => !e.dead).length;
+    // [perf] 매 프레임 스폰 게이트에서 호출 — filter 임시배열 없이 단순 카운터.
+    let n = 0;
+    for (const e of this.enemies) if (!e.dead) n++;
+    return n;
   }
 
   // 가중 스폰 선택 — SPAWN_WEIGHTS 비율로 뽑아 tank를 희소화. 가중치 없는 타입은 1.
@@ -104,9 +128,9 @@ export default class CombatDirector {
     const px = this.player.getX();
     const now = this.scene.time.now;
 
-    // 스폰 타이밍 — 동시 생존 상한은 현재 웨이브가 결정
+    // 스폰 타이밍 — 동시 생존 상한은 현재 웨이브가 결정. 보스전(suppressSpawn) 중엔 잡몹 스폰 중단.
     this.spawnAccum += dtMs;
-    if (this.spawnAccum >= this.nextSpawnIn && this.aliveCount() < this.getWaveParams().maxAlive) {
+    if (!this.suppressSpawn && this.spawnAccum >= this.nextSpawnIn && this.aliveCount() < this.getWaveParams().maxAlive) {
       this.spawn();
       this.scheduleNextSpawn();
     }
@@ -144,9 +168,9 @@ export default class CombatDirector {
       }
     }
 
-    // 연출 끝난 적 청소
-    if (this.enemies.some((e) => e.removed)) {
-      this.enemies = this.enemies.filter((e) => !e.removed);
+    // 연출 끝난 적 청소 — [perf] some+filter 이중순회/임시배열 대신 역순 splice 한 번에.
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      if (this.enemies[i].removed) this.enemies.splice(i, 1);
     }
   }
 

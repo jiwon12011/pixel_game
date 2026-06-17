@@ -8,10 +8,32 @@ import factoryUrl from '../../assets/ai-generated/backgrounds/web/parallax_l2_fa
 import wreckageUrl from '../../assets/ai-generated/backgrounds/web/parallax_l3_wreckage.webp';
 import groundUrl from '../../assets/ai-generated/backgrounds/web/parallax_l4_ground.webp';
 
+// 지역 변형 배경 3종 — downtown은 위 4레이어 패럴랙스, 그 외 지역은 풀커버 단일 이미지.
+// 선행로드 금지(IMAGE_MANIFEST에 안 넣음) — 지역 진입 시 REGION_BG_MANIFEST로 지연 로드.
+// 재생성: npm run optimize:variants (scripts/optimize-variants.mjs, height 371 비율유지 q82)
+import bgHighwayUrl from '../../assets/ai-generated/backgrounds/variants/web/ruined_elevated_highway.webp';
+import bgFactoryUrl from '../../assets/ai-generated/backgrounds/variants/web/ruined_factory_exterior.webp';
+import bgSewerUrl from '../../assets/ai-generated/backgrounds/variants/web/flooded_sewer_channel.webp';
+// 심층 지역 변형 6종(wave 20+) — 위와 동일하게 지역 진입 시 지연 로드.
+import bgBunkerUrl from '../../assets/ai-generated/backgrounds/variants/web/underground_bunker_corridor.webp';
+import bgHospitalUrl from '../../assets/ai-generated/backgrounds/variants/web/abandoned_hospital_courtyard.webp';
+import bgPowerplantUrl from '../../assets/ai-generated/backgrounds/variants/web/damaged_power_plant_interior.webp';
+import bgSwampUrl from '../../assets/ai-generated/backgrounds/variants/web/toxic_swamp_outskirts.webp';
+import bgLandfillUrl from '../../assets/ai-generated/backgrounds/variants/web/landfill_crater.webp';
+import bgCheckpointUrl from '../../assets/ai-generated/backgrounds/variants/web/quarantine_checkpoint_ruins.webp';
+
 // 주인공 — 진행도 stage_01(누더기 시작 버전). 무손실 webp 사본(원본 226x478 그대로, 종횡비 유지).
 // 히어로 스프라이트라 무손실로 선명도 보존. footOriginY/originX는 같은 비율이라 영향 없음.
 // 재생성: npm run optimize:assets (characters 카테고리, 종횡비 유지·512px 상한·lossless)
 import scrapperStage01Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_01.webp';
+// 진행 2~8단계 — 선행로드 금지(IMAGE_MANIFEST엔 stage_01만). 단계 상승 시 STAGE_MANIFEST로 지연 로드.
+import scrapperStage02Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_02.webp';
+import scrapperStage03Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_03.webp';
+import scrapperStage04Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_04.webp';
+import scrapperStage05Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_05.webp';
+import scrapperStage06Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_06.webp';
+import scrapperStage07Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_07.webp';
+import scrapperStage08Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_08.webp';
 
 // UI 탭 아이콘 4종 — 128px q85 webp 사본(탭바 28px 렌더라 충분). PNG 대비 ~95% 경량(초기 로드 -30%).
 // 재생성: npm run optimize:assets (ui 카테고리)
@@ -81,7 +103,24 @@ export const TEX = {
   BG_L2: 'bg-l2-factory',
   BG_L3: 'bg-l3-wreckage',
   BG_L4: 'bg-l4-ground',
+  // 지역 변형 풀커버 배경(지연 로드)
+  BG_REGION_HIGHWAY: 'bg-region-highway',
+  BG_REGION_FACTORY: 'bg-region-factory',
+  BG_REGION_SEWER: 'bg-region-sewer',
+  BG_REGION_BUNKER: 'bg-region-bunker',
+  BG_REGION_HOSPITAL: 'bg-region-hospital',
+  BG_REGION_POWERPLANT: 'bg-region-powerplant',
+  BG_REGION_SWAMP: 'bg-region-swamp',
+  BG_REGION_LANDFILL: 'bg-region-landfill',
+  BG_REGION_CHECKPOINT: 'bg-region-checkpoint',
   SCRAPPER_STAGE_01: 'scrapper-stage-01',
+  SCRAPPER_STAGE_02: 'scrapper-stage-02',
+  SCRAPPER_STAGE_03: 'scrapper-stage-03',
+  SCRAPPER_STAGE_04: 'scrapper-stage-04',
+  SCRAPPER_STAGE_05: 'scrapper-stage-05',
+  SCRAPPER_STAGE_06: 'scrapper-stage-06',
+  SCRAPPER_STAGE_07: 'scrapper-stage-07',
+  SCRAPPER_STAGE_08: 'scrapper-stage-08',
   TAB_CRAFT: 'tab-craft',
   TAB_SKILL: 'tab-skill',
   TAB_STATS: 'tab-stats',
@@ -117,6 +156,20 @@ export const IMAGE_MANIFEST = [
   { key: 'mat-chemical-vial', url: matChemicalVialUrl },
   { key: 'mat-broken-circuit-board', url: matBrokenCircuitBoardUrl }
 ];
+
+// 진행 단계 텍스처 1~8 — stage 번호 → { key, url }. stage_01만 선행로드(IMAGE_MANIFEST),
+// 2~8은 단계 상승 시 CombatScene이 지연 로드 + 다음 1단계 선행 캐시한다(메모리 최대 2~3장).
+// key는 TEX 값과 1:1(=CHARACTER_STAGES[n].texKey가 가리키는 TEX 항목의 실제 텍스처 키).
+export const STAGE_MANIFEST = {
+  1: { key: TEX.SCRAPPER_STAGE_01, url: scrapperStage01Url },
+  2: { key: TEX.SCRAPPER_STAGE_02, url: scrapperStage02Url },
+  3: { key: TEX.SCRAPPER_STAGE_03, url: scrapperStage03Url },
+  4: { key: TEX.SCRAPPER_STAGE_04, url: scrapperStage04Url },
+  5: { key: TEX.SCRAPPER_STAGE_05, url: scrapperStage05Url },
+  6: { key: TEX.SCRAPPER_STAGE_06, url: scrapperStage06Url },
+  7: { key: TEX.SCRAPPER_STAGE_07, url: scrapperStage07Url },
+  8: { key: TEX.SCRAPPER_STAGE_08, url: scrapperStage08Url }
+};
 
 // 무기 아이콘 18종 — 합성 탭 첫 진입 시 1회 지연 로드 후 캐시(키 = 무기 id).
 // 전투 활성 중 대량 로드가 60fps를 깨지 않게 HubScene이 탭 진입 시점에만 로드한다.
@@ -164,4 +217,19 @@ export const ENEMY_MANIFEST = {
 export const BOSS_MANIFEST = {
   colossus_boss: colossusUrl,
   the_herald_boss: heraldUrl
+};
+
+// 지역 id → 변형 배경 { key, url }. downtown은 매핑 없음(4레이어 패럴랙스 시그니처 룩 유지).
+// 적/보스와 동일하게 지역 진입 시 1장만 지연 로드(선행로드 금지) — 배경 webp가 작아도(45~55KB)
+// 안 보이는 지역까지 미리 받지 않는다. 키는 한 곳(여기)에서만 관리해 매핑 분산을 막는다.
+export const REGION_BG_MANIFEST = {
+  highway: { key: TEX.BG_REGION_HIGHWAY, url: bgHighwayUrl },
+  factory: { key: TEX.BG_REGION_FACTORY, url: bgFactoryUrl },
+  sewer: { key: TEX.BG_REGION_SEWER, url: bgSewerUrl },
+  bunker: { key: TEX.BG_REGION_BUNKER, url: bgBunkerUrl },
+  hospital: { key: TEX.BG_REGION_HOSPITAL, url: bgHospitalUrl },
+  powerplant: { key: TEX.BG_REGION_POWERPLANT, url: bgPowerplantUrl },
+  swamp: { key: TEX.BG_REGION_SWAMP, url: bgSwampUrl },
+  landfill: { key: TEX.BG_REGION_LANDFILL, url: bgLandfillUrl },
+  checkpoint: { key: TEX.BG_REGION_CHECKPOINT, url: bgCheckpointUrl }
 };
