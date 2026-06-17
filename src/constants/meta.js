@@ -4,6 +4,8 @@
 //   · LEGACY_CAPS     — 사망 유산으로 다음 런에 들고 갈 수 있는 상한
 //   · MEMORY_*        — R5 적기억(이전 런 속성 학습 → 내성) 데이터. R4선 tally 적재/감쇠만.
 
+import { MATERIAL_ORDER, freshMaterials } from './materials.js';
+
 // 적기억 tally 키 = 무기 attrTag (crafting.js). 적이 "당한" 속성을 누적.
 export const MEMORY_ATTRS = ['PHYSICAL', 'SHOCK', 'PIERCE', 'FIRE', 'TOXIC'];
 
@@ -12,18 +14,20 @@ export const META_DEFAULTS = {
   runCount: 0,
   // legacy.type 이 null 이면 "유산 없음" — startNewRun에서 carry 스킵.
   legacy: {
-    type: null, // 'weapon' | 'parts' | 'coins' | 'stat' | null
+    type: null, // 'weapon' | 'materials' | 'coins' | 'stat' | null
     weapon: null,
-    parts: { SCRAP: 0, ELEC: 0, POWDER: 0 },
+    materials: freshMaterials(), // 재료 dict carry(R7)
     coins: 0,
     stat: null
   },
   codex: { discoveredRecipes: [] }, // 발견(제작)한 무기 id — R5 도감 보드가 읽음
-  enemyMemory: { tally: { PHYSICAL: 0, SHOCK: 0, PIERCE: 0, FIRE: 0, TOXIC: 0 } }
+  enemyMemory: { tally: { PHYSICAL: 0, SHOCK: 0, PIERCE: 0, FIRE: 0, TOXIC: 0 } },
+  // R7 — 직전 런 요약(사망 확정 시 기록, 사망 오버레이가 RUN #N과 함께 표시).
+  lastRunSummary: { kills: 0, maxWave: 0, coins: 0, lastCraftedWeapon: null }
 };
 
-// 유산 carry 상한 (ideator). ELEC/POWDER는 합산으로 cap.
-export const LEGACY_CAPS = { SCRAP: 20, ELECPOWDER: 6, coins: 40 };
+// 유산 carry 상한 (ideator). 재료는 ×0.5 floor로만 carry하므로 코인만 cap.
+export const LEGACY_CAPS = { coins: 40 };
 
 // R5 적기억: tally가 threshold 넘으면 해당 속성 데미지 mult 적용(내성). 높은 tier 우선.
 export const MEMORY_TIERS = [
@@ -45,33 +49,36 @@ export function freshLegacy() {
 }
 
 // ── 사망 유산 4선택지 계산 (ideator 밸런스) ──────────────────────────────
-// run = GameState 스냅샷(coins, parts, statLevels, ownedWeapons:Set, equippedWeapon).
+// run = GameState 스냅샷(coins, materials, statLevels, ownedWeapons:Set, equippedWeapon).
 // 각 항목: { type, enabled, ...payload }. enabled=false면 카드 비활성(보유 부족).
 // payload는 그대로 GameState.setLegacy로 넘긴다.
 export function legacyOptions(run) {
-  // 무기 — 현재 장착 무기를 그대로 carry(파츠/코인은 리셋). 기본 무기면 의미 없어 비활성.
+  // 무기 — 현재 장착 무기를 그대로 carry(재료/코인은 리셋). 기본 무기면 의미 없어 비활성.
   const weapon = {
     type: 'weapon',
     weapon: run.equippedWeapon,
     enabled: run.equippedWeapon !== 'pipe_wrench'
   };
 
-  // 파츠 — SCRAP×0.5(cap20), ELEC×0.3·POWDER×0.3(합 cap6), 전부 floor.
-  const carry = {
-    SCRAP: Math.min(LEGACY_CAPS.SCRAP, Math.floor(run.parts.SCRAP * 0.5)),
-    ELEC: Math.floor(run.parts.ELEC * 0.3),
-    POWDER: Math.floor(run.parts.POWDER * 0.3)
-  };
-  // ELEC+POWDER 합 cap — 초과분은 POWDER부터 깎고 그래도 넘으면 ELEC.
-  let overflow = carry.ELEC + carry.POWDER - LEGACY_CAPS.ELECPOWDER;
-  if (overflow > 0) {
-    const cutP = Math.min(carry.POWDER, overflow);
-    carry.POWDER -= cutP;
-    overflow -= cutP;
-    if (overflow > 0) carry.ELEC -= overflow;
+  // 재료 — 보유한 각 재료 ×0.5 floor(>0만) carry. 다음 런 시작값에 주입.
+  const carry = {};
+  let materialsTotal = 0;
+  let kinds = 0;
+  for (const k of MATERIAL_ORDER) {
+    const n = Math.floor((run.materials?.[k] || 0) * 0.5);
+    if (n > 0) {
+      carry[k] = n;
+      materialsTotal += n;
+      kinds += 1;
+    }
   }
-  const partsTotal = carry.SCRAP + carry.ELEC + carry.POWDER;
-  const parts = { type: 'parts', parts: carry, total: partsTotal, enabled: partsTotal > 0 };
+  const materials = {
+    type: 'materials',
+    materials: carry,
+    total: materialsTotal,
+    kinds,
+    enabled: materialsTotal > 0
+  };
 
   // 코인 — coins×0.3(cap40), floor.
   const coinsCarry = Math.min(LEGACY_CAPS.coins, Math.floor(run.coins * 0.3));
@@ -88,5 +95,5 @@ export function legacyOptions(run) {
   }
   const stat = { type: 'stat', stat: bestStat, enabled: bestLvl > 0 };
 
-  return [weapon, parts, coins, stat];
+  return [weapon, materials, coins, stat];
 }

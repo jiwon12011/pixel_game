@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import ParallaxBackground from '../objects/ParallaxBackground.js';
 import CombatDirector from '../objects/CombatDirector.js';
-import { TEX, ENEMY_MANIFEST } from '../assets/manifest.js';
+import { TEX, ENEMY_MANIFEST, WEAPON_MANIFEST } from '../assets/manifest.js';
 import {
   CHARACTER,
   COMBAT_H,
@@ -17,6 +17,7 @@ import {
   COMBAT_CSS,
   MOTION,
   WAVE,
+  WEAPON_HAND,
   waveParams,
   ENEMY_MEMORY_MAP
 } from '../constants/combat.js';
@@ -25,6 +26,7 @@ import { prefersReducedMotion } from '../utils/motion.js';
 import GameState from '../state/GameState.js';
 import { rollDrop } from '../constants/drops.js';
 import { WEAPON_RECIPES, STAT_UPGRADES, defenseMultiplier } from '../constants/crafting.js';
+import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 import { legacyOptions } from '../constants/meta.js';
 
 // 전투 뷰(상단 58%): 4레이어 패럴랙스 + 주인공 + 자동 진행 전투.
@@ -58,6 +60,7 @@ export default class CombatScene extends Phaser.Scene {
     this.playerHP = this.maxHP;
 
     this.createCharacter();
+    this.syncHandWeapon(); // 장착 무기 손표시(맨손 stage_01 위 오버레이)
     this.createVignette();
     this.createHud();
     this.createWaveHud();
@@ -73,7 +76,10 @@ export default class CombatScene extends Phaser.Scene {
   // GameState 구독 — 허브에서 일어난 변경(업그레이드/합성)을 전투에 즉시 반영.
   // 씬 종료 시 누수 방지를 위해 unbinder를 모아 shutdown에서 해제.
   bindGameState() {
-    const offChange = GameState.on('change', () => this.syncResourceHud());
+    const offChange = GameState.on('change', () => {
+      this.syncResourceHud();
+      this.syncHandWeapon(); // 합성 탭에서 장착 무기를 바꾸면 손 무기도 교체
+    });
     const offStats = GameState.on('stats', ({ stat }) => {
       if (stat !== 'maxHP') return;
       // maxHP 증가분만큼 현재 전투 HP도 즉시 회복(체감되는 보상).
@@ -194,6 +200,80 @@ export default class CombatScene extends Phaser.Scene {
       ease: 'Sine.inOut',
       yoyo: true,
       repeat: -1
+    });
+  }
+
+  // ── 무기 손표시 (R7 #6) ────────────────────────────────────────────────
+  // 장착 무기 아이콘을 손 근처에 정적 오버레이. 텍스처는 1종만 지연 로드(전투 중 대량 X).
+  // 위치는 update()에서 character를 따라가며 갱신(idle bob·런지에 함께 움직임).
+  syncHandWeapon() {
+    const id = GameState.equippedWeapon;
+    if (id === this._handWeaponId) return;
+    this._handWeaponId = id;
+    this.ensureWeaponTexture(id, () => {
+      if (this._handWeaponId !== id) return; // 로드 도중 또 바뀌면 마지막 것만 반영
+      this.applyHandWeaponTexture(id);
+    });
+  }
+
+  // 손 무기 텍스처 1종 지연 로드(이미 있으면 즉시 콜백). 전투 활성 중이라도 1장이라 가볍다.
+  ensureWeaponTexture(id, cb) {
+    if (this.textures.exists(id) || !WEAPON_MANIFEST[id]) {
+      cb();
+      return;
+    }
+    this.load.image(id, WEAPON_MANIFEST[id]);
+    this.load.once('complete', cb);
+    this.load.start();
+  }
+
+  applyHandWeaponTexture(id) {
+    if (!this.textures.exists(id)) return;
+    const src = this.textures.get(id).getSourceImage();
+    const scale = WEAPON_HAND.displaySize / src.height;
+    if (!this.weaponSprite) {
+      this.weaponSprite = this.add
+        .image(this.playerX, this.groundY, id)
+        .setOrigin(0.5)
+        .setAngle(WEAPON_HAND.angle)
+        .setDepth(this.parallax.topDepth + 1.5); // 캐릭터 바로 위
+    } else {
+      this.weaponSprite.setTexture(id);
+    }
+    this.weaponSprite.setScale(scale);
+    this.updateHandWeaponPos();
+    this._playEquipFlourish(scale);
+  }
+
+  // 손 무기를 캐릭터 손 앵커로 이동. character.x/y(bob·런지)를 따라가 자연스럽게 붙는다.
+  updateHandWeaponPos() {
+    if (!this.weaponSprite) return;
+    this.weaponSprite.setPosition(
+      this.character.x + WEAPON_HAND.offsetX,
+      this.character.y - this.charDisplayH * WEAPON_HAND.heightRatio + WEAPON_HAND.offsetY
+    );
+  }
+
+  // [모션] 무기 장착 플러리시 — 스케일 팝 equipScaleFrom→1 + 각도 정착.
+  // "새 무기를 쥐었다" 체감. weaponSprite.angle만 조작(position은 update()가 처리).
+  // onComplete 없음 — weaponSprite는 씬 종료까지 살아있어 누수 위험 없음.
+  // reduced-motion: 즉시 최종 상태(scale/angle은 applyHandWeaponTexture에서 이미 세팅).
+  _playEquipFlourish(scale) {
+    if (!this.weaponSprite || !this.motionOk) return;
+
+    // 이전 플러리시·런지 스윙 트윈 정리 후 새 플러리시 시작
+    this.tweens.killTweensOf(this.weaponSprite);
+    this.weaponSprite
+      .setScale(scale * MOTION.equipScaleFrom)
+      .setAngle(WEAPON_HAND.angle + MOTION.equipAngleDelta);
+
+    this.tweens.add({
+      targets: this.weaponSprite,
+      scaleX: scale,
+      scaleY: scale,
+      angle: WEAPON_HAND.angle,
+      duration: MOTION.equipFlourishMs,
+      ease: 'Back.out'
     });
   }
 
@@ -328,6 +408,27 @@ export default class CombatScene extends Phaser.Scene {
           ease: 'Expo.out',
           onComplete: () => {
             apply(); // 풀 익스텐션 시점에 데미지 + 히트스톱
+
+            // [모션] 런지 정점 무기 스윙 — angle만 조작(position은 update()가 처리).
+            // forward → 복귀 체인. 누수 없음(weaponSprite 씬 소유, onComplete 종료).
+            if (this.weaponSprite?.active && this.motionOk) {
+              this.tweens.add({
+                targets: this.weaponSprite,
+                angle: WEAPON_HAND.angle + MOTION.lungeWeaponAngleDelta,
+                duration: MOTION.lungeWeaponSwingMs,
+                ease: 'Quad.out',
+                onComplete: () => {
+                  if (!this.weaponSprite?.active) return;
+                  this.tweens.add({
+                    targets: this.weaponSprite,
+                    angle: WEAPON_HAND.angle,
+                    duration: MOTION.recoveryMs,
+                    ease: 'Back.out'
+                  });
+                }
+              });
+            }
+
             // 3단계: 복귀 — 탄성 있게 원위치
             this.tweens.add({
               targets: this.character,
@@ -353,16 +454,14 @@ export default class CombatScene extends Phaser.Scene {
     this.refreshWaveHud();
     if (waveChanged) this.showWaveBanner(waveIndex);
 
-    // 2) 드롭 — 코인은 round, 파츠는 floor로 dropMult 반영(희귀 파츠 과인플레 방지).
+    // 2) 드롭 — 코인은 round, 재료는 floor로 dropMult 반영(희귀 재료 과인플레 방지).
     const drop = rollDrop(enemy.typeKey);
     const mult = waveParams(GameState.waveIndex).dropMult;
     if (mult !== 1) {
-      drop.coins = Math.round(drop.coins * mult);
-      drop.SCRAP = Math.floor(drop.SCRAP * mult);
-      drop.ELEC = Math.floor(drop.ELEC * mult);
-      drop.POWDER = Math.floor(drop.POWDER * mult);
+      drop.coins = Math.round((drop.coins || 0) * mult);
+      for (const k of MATERIAL_ORDER) if (drop[k]) drop[k] = Math.floor(drop[k] * mult);
     }
-    const hasAny = drop.coins || drop.SCRAP || drop.ELEC || drop.POWDER;
+    const hasAny = drop.coins || MATERIAL_ORDER.some((k) => drop[k]);
     if (!hasAny) return;
     const x = enemy.container.x;
     const y = enemy.container.y - enemy.displayHeight * 0.5;
@@ -444,6 +543,7 @@ export default class CombatScene extends Phaser.Scene {
     // R5 — 이번 런에서 누적된 적기억 tally를 즉시 영속(런 종료 1회, 핫패스 아님).
     // 사망 화면에서 탭을 닫아도 다음 런 학습이 보존된다(startNewRun도 한 번 더 저장).
     GameState.saveMeta();
+    GameState.recordRunSummary(); // R7 — 직전 런 요약 기록(오버레이가 RUN #N과 함께 표시)
     this.showDeathOverlay();
   }
 
@@ -462,6 +562,19 @@ export default class CombatScene extends Phaser.Scene {
     const scrim = this.add.rectangle(0, 0, W, H, 0x0a0805, 0.88).setOrigin(0, 0);
     layer.add(scrim);
 
+    // ── RUN #N (좌상단) — 로그라이크 회차 표식. runCount는 startNewRun에서 +1 되므로
+    //    현재 플레이한(방금 끝난) 런 번호 = runCount+1. ─────────────────────
+    const runNo = GameState.meta.runCount + 1;
+    const runText = this.add
+      .text(16, 50, `RUN #${runNo}`, {
+        fontFamily: PIXEL_FONT,
+        fontSize: '12px',
+        color: '#f0c040'
+      })
+      .setOrigin(0, 0.5);
+    runText.setShadow(1, 1, '#000000', 0, false, true);
+    layer.add(runText);
+
     // ── 타이틀 ─────────────────────────────────────────────────────────
     const titleText = this.add
       .text(W / 2, 70, '런 종료', {
@@ -474,20 +587,22 @@ export default class CombatScene extends Phaser.Scene {
       .setOrigin(0.5);
     layer.add(titleText);
 
-    // ── 런 요약 — 도달 웨이브 / 처치 수 / 모은 코인 ─────────────────────
+    // ── 런 요약(강화) — 최다 킬 / 최고 웨이브 / 획득 자원. lastRunSummary 사용. ─────
+    const sum = GameState.meta.lastRunSummary;
     const summaryLines = [
-      `도달 웨이브  ${GameState.waveIndex}`,
-      `처치  ${GameState.runKills}`,
-      `모은 코인  ${GameState.coins}`
+      `최다 킬  ${sum.kills}`,
+      `최고 웨이브  ${sum.maxWave}`,
+      `획득 자원  ${sum.coins}`
     ];
     const summaryTexts = summaryLines.map((line, i) => {
       const t = this.add
         .text(W / 2, 104 + i * 16, line, {
           fontFamily: PIXEL_FONT,
-          fontSize: '11px',
+          fontSize: '10px',
           color: '#cbb89a'
         })
         .setOrigin(0.5);
+      t.setShadow(1, 1, '#000000', 0, false, true);
       layer.add(t);
       return t;
     });
@@ -558,6 +673,7 @@ export default class CombatScene extends Phaser.Scene {
     const origCardY = this.legacyCards.map((c) => c.cardContainer.y);
 
     scrim.setAlpha(0);
+    runText.setAlpha(0);
     titleText.setAlpha(0).setScale(0.55);
     summaryTexts.forEach((t, i) => t.setAlpha(0).setY(origSummaryY[i] + 8));
     subtitleText.setAlpha(0).setY(origSubtitleY + 6);
@@ -567,10 +683,16 @@ export default class CombatScene extends Phaser.Scene {
     btnBg.setAlpha(0);
     btnLabel.setAlpha(0);
 
-    // 1. 암막 페이드인 (600ms)
+    // 1. 암막 페이드인 (600ms) + RUN #N 함께 등장
     this.tweens.add({
       targets: scrim,
       alpha: 0.88,
+      duration: MOTION.deathScrimMs,
+      ease: 'Quad.out'
+    });
+    this.tweens.add({
+      targets: runText,
+      alpha: 1,
       duration: MOTION.deathScrimMs,
       ease: 'Quad.out'
     });
@@ -727,8 +849,8 @@ export default class CombatScene extends Phaser.Scene {
     switch (opt.type) {
       case 'weapon':
         return '무기';
-      case 'parts':
-        return '파츠';
+      case 'materials':
+        return '재료';
       case 'coins':
         return '코인';
       case 'stat':
@@ -742,15 +864,8 @@ export default class CombatScene extends Phaser.Scene {
     switch (opt.type) {
       case 'weapon':
         return opt.enabled ? (WEAPON_RECIPES[opt.weapon]?.name || opt.weapon) : '기본 무기뿐';
-      case 'parts': {
-        if (!opt.enabled) return '보유 없음';
-        const p = opt.parts;
-        const bits = [];
-        if (p.SCRAP) bits.push(`S+${p.SCRAP}`);
-        if (p.ELEC) bits.push(`E+${p.ELEC}`);
-        if (p.POWDER) bits.push(`P+${p.POWDER}`);
-        return bits.join(' ');
-      }
+      case 'materials':
+        return opt.enabled ? `${opt.kinds}종 ${opt.total}개` : '보유 없음';
       case 'coins':
         return opt.enabled ? `+${opt.coins} 코인` : '보유 없음';
       case 'stat':
@@ -818,7 +933,7 @@ export default class CombatScene extends Phaser.Scene {
     let legacy = null;
     if (opt) {
       if (opt.type === 'weapon') legacy = { type: 'weapon', weapon: opt.weapon };
-      else if (opt.type === 'parts') legacy = { type: 'parts', parts: opt.parts };
+      else if (opt.type === 'materials') legacy = { type: 'materials', materials: opt.materials };
       else if (opt.type === 'coins') legacy = { type: 'coins', coins: opt.coins };
       else if (opt.type === 'stat') legacy = { type: 'stat', stat: opt.stat };
     }
@@ -1016,48 +1131,29 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
-  // ── 자원 HUD (전투뷰 우상단): 코인/스크랩/ELEC/POWDER 카운터 ──────────
-  // 줍기 연출이 빨려드는 목적지이기도 하다(좌표를 resHud에 저장).
+  // ── 자원 HUD (전투뷰 우상단): 코인만 상시 표시 ────────────────────────
+  // R7 — 재료는 인벤 탭에서 본다(전투 HUD는 코인만). 코인 줍기가 빨려드는 목적지.
   createResourceHud() {
     const y = 14;
-    const items = [
-      { key: 'coins', tex: TEX.COIN_REWARD, color: COMBAT_COLORS.gold },
-      { key: 'SCRAP', tex: TEX.SCRAP_PARTS, color: COMBAT_COLORS.scrap },
-      { key: 'ELEC', color: PALETTE.accentToxic },
-      { key: 'POWDER', color: PALETTE.accentElectric }
-    ];
-    const slotW = 50;
-    const startX = LOGICAL.width - items.length * slotW + 8;
-    this.resHud = {};
-
-    items.forEach((it, i) => {
-      const x = startX + i * slotW;
-      if (it.tex && this.textures.exists(it.tex)) {
-        const src = this.textures.get(it.tex).getSourceImage();
-        this.add
-          .image(x, y, it.tex)
-          .setOrigin(0, 0.5)
-          .setScale(16 / src.height)
-          .setDepth(61);
-      } else {
-        // ELEC/POWDER는 전용 아이콘이 없어 색칩으로 표기
-        this.add
-          .rectangle(x + 1, y, 9, 9, it.color)
-          .setOrigin(0, 0.5)
-          .setStrokeStyle(1, 0x000000, 0.5)
-          .setDepth(61);
-      }
-      const txt = this.add
-        .text(x + 15, y, '0', {
-          fontFamily: PIXEL_FONT,
-          fontSize: '10px',
-          color: '#f4ead2'
-        })
+    const x = LOGICAL.width - 54;
+    if (this.textures.exists(TEX.COIN_REWARD)) {
+      const src = this.textures.get(TEX.COIN_REWARD).getSourceImage();
+      this.add
+        .image(x, y, TEX.COIN_REWARD)
         .setOrigin(0, 0.5)
+        .setScale(16 / src.height)
         .setDepth(61);
-      txt.setShadow(1, 1, '#000000', 0, false, true);
-      this.resHud[it.key] = { txt, x, y };
-    });
+    }
+    const txt = this.add
+      .text(x + 15, y, '0', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '11px',
+        color: '#f4ead2'
+      })
+      .setOrigin(0, 0.5)
+      .setDepth(61);
+    txt.setShadow(1, 1, '#000000', 0, false, true);
+    this.resHud = { coins: { txt, x, y } };
 
     this.syncResourceHud();
   }
@@ -1065,22 +1161,87 @@ export default class CombatScene extends Phaser.Scene {
   syncResourceHud() {
     if (!this.resHud) return;
     this.resHud.coins.txt.setText(String(GameState.coins));
-    this.resHud.SCRAP.txt.setText(String(GameState.parts.SCRAP));
-    this.resHud.ELEC.txt.setText(String(GameState.parts.ELEC));
-    this.resHud.POWDER.txt.setText(String(GameState.parts.POWDER));
   }
 
-  // ── 드롭 줍기 연출 — 사망 위치에서 HUD 카운터로 튐 ─────────────────────
+  // ── 드롭 줍기 연출 ─────────────────────────────────────────────────────
+  // 코인은 우상단 HUD 카운터로 빨려들고, 재료는 사망 위치에서 아이콘이 떠올랐다
+  // 사라지는 "줍기 표시"(인벤 탭에 누적). 토스트는 onDropToast에서 별도.
   spawnPickup(drop, x, y) {
-    const types = [
-      { key: 'coins', tex: TEX.COIN_REWARD, color: COMBAT_COLORS.gold },
-      { key: 'SCRAP', tex: TEX.SCRAP_PARTS, color: COMBAT_COLORS.scrap },
-      { key: 'ELEC', color: PALETTE.accentToxic },
-      { key: 'POWDER', color: PALETTE.accentElectric }
-    ];
-    types.forEach((t, i) => {
-      if (!drop[t.key]) return;
-      this.flyPickup(t, x, y, this.resHud[t.key], i);
+    if (drop.coins) {
+      this.flyPickup(
+        { key: 'coins', tex: TEX.COIN_REWARD, color: COMBAT_COLORS.gold },
+        x,
+        y,
+        this.resHud.coins,
+        0
+      );
+    }
+    let i = 0;
+    for (const key of MATERIAL_ORDER) {
+      if (!drop[key]) continue;
+      this.popMaterial(key, drop[key], x, y, i++);
+    }
+  }
+
+  // 재료 1종 줍기 팝 — 아이콘 + ×N 라벨이 사망 위치에서 떠오르며 페이드.
+  popMaterial(key, count, x, y, idx) {
+    const meta = MATERIAL_META[key];
+    const sx = x + Phaser.Math.Between(-MOTION.pickupSpreadX, MOTION.pickupSpreadX);
+    let obj;
+    if (meta && this.textures.exists(meta.iconKey)) {
+      const src = this.textures.get(meta.iconKey).getSourceImage();
+      obj = this.add.image(sx, y, meta.iconKey).setScale(18 / src.height);
+    } else {
+      obj = this.add
+        .rectangle(sx, y, 10, 10, GRADE_COLOR[meta?.grade] || 0x8a6a3a)
+        .setStrokeStyle(1, 0x000000, 0.5);
+    }
+    obj.setDepth(66);
+    const label = this.add
+      .text(sx + 9, y - 7, `×${count}`, {
+        fontFamily: PIXEL_FONT,
+        fontSize: '8px',
+        color: '#f4ead2'
+      })
+      .setOrigin(0, 0.5)
+      .setDepth(66);
+    label.setShadow(1, 1, '#000000', 0, false, true);
+
+    if (!this.motionOk) {
+      this.time.delayedCall(450, () => {
+        obj.destroy();
+        label.destroy();
+      });
+      return;
+    }
+
+    // 스케일 팝 (obj만) — { from, to }로 delay 뒤에 작은→정상 팝.
+    // 레이블은 scale 1 고정. reduced-motion 분기는 위에서 이미 반환됨.
+    const s0 = obj.scaleX;
+    this.tweens.add({
+      targets: obj,
+      scaleX: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
+      scaleY: { from: s0 * MOTION.matPopScaleFrom, to: s0 },
+      delay: idx * 60,
+      duration: MOTION.matPopScaleMs,
+      ease: 'Back.out'
+    });
+
+    // 포물선 상승 + 페이드 — arcX 드리프트로 "뭔가 주웠다" 체감.
+    // 팝 tween과 동시에 시작해 상승하며 팝. onComplete에서 obj·label 정리(누수 없음).
+    const arcX = Phaser.Math.Between(-MOTION.matPopArcX, MOTION.matPopArcX);
+    this.tweens.add({
+      targets: [obj, label],
+      x: `+=${arcX}`,
+      y: `-=${22 + idx * 4}`,
+      alpha: 0,
+      delay: idx * 60,
+      duration: 700,
+      ease: 'Quad.out',
+      onComplete: () => {
+        obj.destroy();
+        label.destroy();
+      }
     });
   }
 
@@ -1141,9 +1302,9 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
-  // ── 드롭 토스트 (희귀 파츠 획득 시 중앙상단 배너) ──────────────────────
-  // 코인/스크랩은 매 처치라 줍기 연출로 충분 — 토스트는 ELEC/POWDER 같은
-  // 의미 있는 드롭에만 띄워 스팸/오버드로우를 막는다(designer 박스 스펙 유지).
+  // ── 드롭 토스트 (희소 재료 획득 시 중앙상단 배너 "획득: 이름 ×N") ──────────
+  // 흔한 재료(grade 1)는 매 처치라 줍기 팝(popMaterial)으로 충분 — 토스트는 grade≥2
+  // 희소 재료에만 띄워 스팸/오버드로우를 막는다(designer 박스 스펙 유지).
   createToast() {
     this.toast = this.add
       .container(LOGICAL.width / 2, 40)
@@ -1151,31 +1312,42 @@ export default class CombatScene extends Phaser.Scene {
       .setAlpha(0)
       .setVisible(false);
     this.toastBg = this.add
-      .rectangle(0, 0, 160, 36, 0x12100c, 0.9)
+      .rectangle(0, 0, 184, 34, 0x12100c, 0.92)
       .setStrokeStyle(1, PALETTE.accentGold, 0.85);
-    this.toastChip = this.add.rectangle(-62, 0, 12, 12, PALETTE.accentToxic);
+    this.toastIcon = this.add.image(-78, 0, TEX.COIN_REWARD).setVisible(false);
     this.toastText = this.add
-      .text(-46, 0, '', {
+      .text(-60, 0, '', {
         fontFamily: PIXEL_FONT,
-        fontSize: '11px',
+        fontSize: '10px',
         color: '#ffffff'
       })
       .setOrigin(0, 0.5);
-    this.toast.add([this.toastBg, this.toastChip, this.toastText]);
+    this.toastText.setShadow(1, 1, '#000000', 0, false, true);
+    this.toast.add([this.toastBg, this.toastIcon, this.toastText]);
   }
 
   onDropToast(info) {
-    const parts = [];
-    if (info.ELEC) parts.push(`ELEC +${info.ELEC}`);
-    if (info.POWDER) parts.push(`POWDER +${info.POWDER}`);
-    if (parts.length === 0) return;
-    const accent = info.ELEC ? PALETTE.accentToxic : PALETTE.accentElectric;
-    this.showToast(parts.join('   '), accent);
+    // grade≥2(희소) 재료만 토스트. 가장 높은 등급 1종을 대표로 보여주고 나머지는 +N종.
+    const notable = MATERIAL_ORDER.filter((k) => info[k] && MATERIAL_META[k].grade >= 2).sort(
+      (a, b) => MATERIAL_META[b].grade - MATERIAL_META[a].grade
+    );
+    if (notable.length === 0) return;
+    const key = notable[0];
+    const meta = MATERIAL_META[key];
+    const extra = notable.length > 1 ? `  +${notable.length - 1}종` : '';
+    this.showToast(`획득: ${meta.name} ×${info[key]}${extra}`, meta.iconKey, meta.grade >= 3);
   }
 
-  showToast(text, accent) {
+  // text + 아이콘(iconKey). hot=true(grade3)면 테두리를 주황으로 더 강조.
+  showToast(text, iconKey, hot = false) {
     this.toastText.setText(text);
-    this.toastChip.setFillStyle(accent);
+    if (iconKey && this.textures.exists(iconKey)) {
+      const src = this.textures.get(iconKey).getSourceImage();
+      this.toastIcon.setTexture(iconKey).setScale(20 / src.height).setVisible(true);
+    } else {
+      this.toastIcon.setVisible(false);
+    }
+    const accent = hot ? PALETTE.accentElectric : PALETTE.accentGold;
     this.toastBg.setStrokeStyle(1, accent, 0.9);
     this.toast.setVisible(true);
     this.tweens.killTweensOf(this.toast);
@@ -1360,6 +1532,7 @@ export default class CombatScene extends Phaser.Scene {
 
   update(time, delta) {
     this.parallax.update(delta);
+    this.updateHandWeaponPos(); // 손 무기를 캐릭터(bob/런지)에 붙여 따라가게
     // 히트스톱 구간엔 director(이동/공격 타이밍)만 중단 — 트윈 연출은 계속 진행
     if (this.combatReady && time >= this.hitStopUntil) {
       this.director.update(delta);

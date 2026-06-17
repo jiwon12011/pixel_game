@@ -10,9 +10,9 @@ import {
   STAT_ORDER,
   upgradeCost,
   WEAPON_RECIPES,
-  WEAPON_ORDER,
-  PART_META
+  WEAPON_ORDER
 } from '../constants/crafting.js';
+import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 
 // 합성 허브 (하단 42%): 트럭 작업대 톤의 어두운 철판 패널 + 4탭 바.
 // 능력치/합성 탭은 실제 동작(GameState 연동), 스킬/인벤은 "준비 중" 스텁.
@@ -71,7 +71,28 @@ export default class HubScene extends Phaser.Scene {
     this.createTabBar();
     this.bindGameState();
 
+    // 무기 18종 백그라운드 프리페치(P1-2) — 허브는 전투와 병렬 씬이라, 여기서 미리 캐시해 두면
+    // 합성 탭에서 무기를 장착했을 때 CombatScene이 textures.exists()=true로 즉시 손에 표시한다.
+    // (안 하면 전투 루프 중 load.start()가 돌아 모바일에서 1~3프레임 히치)
+    this.prefetchWeapons();
+
     this.showTab(TABS[0]);
+  }
+
+  // 무기 텍스처 일괄 로드(이미 있으면 스킵). 합성 탭 빌드와 무관하게 허브 진입 즉시 시작한다.
+  // 완료 시 weaponsLoaded를 세우고, 합성 탭이 "불러오는 중"으로 떠 있으면 무기 행을 채워 다시 그린다.
+  prefetchWeapons() {
+    const ids = Object.keys(WEAPON_MANIFEST).filter((id) => !this.textures.exists(id));
+    if (ids.length === 0) {
+      this.weaponsLoaded = true;
+      return;
+    }
+    ids.forEach((id) => this.load.image(id, WEAPON_MANIFEST[id]));
+    this.load.once('complete', () => {
+      this.weaponsLoaded = true;
+      if (this.activeTab === 'craft') this.showTab(this.tabByKey('craft'));
+    });
+    this.load.start();
   }
 
   bindGameState() {
@@ -142,6 +163,7 @@ export default class HubScene extends Phaser.Scene {
 
     if (tab.key === 'stats') this.buildStatsTab();
     else if (tab.key === 'craft') this.buildCraftTab();
+    else if (tab.key === 'inv') this.buildInventoryTab();
     else this.buildStubTab(tab);
   }
 
@@ -274,7 +296,8 @@ export default class HubScene extends Phaser.Scene {
 
   // ── 합성 탭 ──────────────────────────────────────────────────────────
   buildCraftTab() {
-    // 무기 도면(텍스처)은 합성 탭 첫 진입에 1회 지연 로드 후 캐시.
+    // 무기 도면(텍스처)은 create()의 prefetchWeapons()가 백그라운드로 미리 로드한다.
+    // 아직 로딩 중이면 안내만 띄우고 빠진다 — 완료 콜백이 weaponsLoaded를 세운 뒤 이 탭을 다시 그린다.
     if (!this.weaponsLoaded) {
       this.layer(
         this.add
@@ -285,10 +308,6 @@ export default class HubScene extends Phaser.Scene {
           })
           .setOrigin(0.5)
       );
-      this.loadWeapons(() => {
-        this.weaponsLoaded = true;
-        if (this.activeTab === 'craft') this.showTab(this.tabByKey('craft'));
-      });
       return;
     }
 
@@ -350,25 +369,34 @@ export default class HubScene extends Phaser.Scene {
     ability.setShadow(1, 1, '#000000', 0, false, true);
     this.layer(ability);
 
-    // 재료 칩(색칩 + 보유/필요). 보유 무기는 숨김. 간격 k*50, 능력 아래 줄(cy+11).
+    // 재료 아이콘(16px) + 보유/필요 수량(8px). 보유 무기는 숨김. 간격 k*48, 능력 아래 줄(cy+11).
+    //   충분(보유≥필요) 청록 / 부족 주황 — 색칩 대신 실제 재료 아이콘으로 한눈에 식별.
     const chips = [];
     const costEntries = Object.entries(recipe.cost || {});
-    costEntries.forEach(([part, need], k) => {
-      const px = CONTENT.x + 40 + k * 50;
+    costEntries.forEach(([matKey, need], k) => {
+      const px = CONTENT.x + 42 + k * 48;
       const py = cy + 11;
-      const chip = this.add
-        .rectangle(px, py, 7, 7, PART_META[part].color)
-        .setOrigin(0, 0.5)
-        .setStrokeStyle(1, 0x000000, 0.5);
+      const meta = MATERIAL_META[matKey];
+      let icon;
+      if (meta && this.textures.exists(meta.iconKey)) {
+        const src = this.textures.get(meta.iconKey).getSourceImage();
+        icon = this.add.image(px, py, meta.iconKey).setOrigin(0.5).setScale(16 / src.height);
+      } else {
+        icon = this.add
+          .rectangle(px, py, 12, 12, GRADE_COLOR[meta?.grade] || 0x8a6a3a)
+          .setOrigin(0.5)
+          .setStrokeStyle(1, 0x000000, 0.5);
+      }
       const txt = this.add
-        .text(px + 10, py, `${PART_META[part].label} 0/${need}`, {
+        .text(px + 11, py, `0/${need}`, {
           fontFamily: PIXEL_FONT,
-          fontSize: '7px',
+          fontSize: '8px',
           color: C.gray
         })
         .setOrigin(0, 0.5);
-      this.layer(chip, txt);
-      chips.push({ part, need, chip, txt });
+      txt.setShadow(1, 1, '#000000', 0, false, true);
+      this.layer(icon, txt);
+      chips.push({ matKey, need, icon, txt });
     });
 
     // 액션 버튼(제작/장착/상태) — 68×24.
@@ -400,17 +428,17 @@ export default class HubScene extends Phaser.Scene {
       const equipped = GameState.equippedWeapon === id;
       const prereqOk = !recipe.requires || GameState.ownedWeapons.has(recipe.requires);
 
-      // 재료 칩 — 보유 무기는 숨기고, 미보유는 보유/필요 + 부족 시 주황 경고
-      chips.forEach(({ part, need, chip, txt }) => {
+      // 재료 아이콘 — 보유 무기는 숨기고, 미보유는 보유/필요 + 부족 시 주황 경고
+      chips.forEach(({ matKey, need, icon, txt }) => {
         if (owned) {
-          chip.setVisible(false);
+          icon.setVisible(false);
           txt.setVisible(false);
           return;
         }
-        chip.setVisible(true);
+        icon.setVisible(true);
         txt.setVisible(true);
-        const have = GameState.parts[part];
-        txt.setText(`${PART_META[part].label} ${have}/${need}`);
+        const have = GameState.materials[matKey] || 0;
+        txt.setText(`${have}/${need}`);
         txt.setColor(have >= need ? C.toxic : C.orange);
       });
 
@@ -422,18 +450,73 @@ export default class HubScene extends Phaser.Scene {
     });
   }
 
-  loadWeapons(cb) {
-    const ids = Object.keys(WEAPON_MANIFEST).filter((id) => !this.textures.exists(id));
-    if (ids.length === 0) {
-      cb();
-      return;
-    }
-    ids.forEach((id) => this.load.image(id, WEAPON_MANIFEST[id]));
-    this.load.once('complete', cb);
-    this.load.start();
+  // ── 인벤 탭 — 보유 재료 7종(아이콘 + 수량) ────────────────────────────
+  // 전투 HUD에서 뺀 재료를 여기서 본다. 단일 컬럼 리스트(가독성 우선).
+  buildInventoryTab() {
+    this.layer(
+      this.add.text(CONTENT.x + 4, CONTENT.y + 6, '재료', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '13px',
+        color: C.gold
+      })
+    );
+
+    const rowH = 23;
+    const startY = CONTENT.y + 30;
+    this.invRows = MATERIAL_ORDER.map((key, i) => {
+      const meta = MATERIAL_META[key];
+      const cy = startY + i * rowH + rowH / 2;
+
+      // 아이콘(18px)
+      if (this.textures.exists(meta.iconKey)) {
+        const src = this.textures.get(meta.iconKey).getSourceImage();
+        this.layer(this.add.image(CONTENT.x + 16, cy, meta.iconKey).setOrigin(0.5).setScale(18 / src.height));
+      } else {
+        this.layer(
+          this.add
+            .rectangle(CONTENT.x + 16, cy, 14, 14, GRADE_COLOR[meta.grade] || 0x8a6a3a)
+            .setStrokeStyle(1, 0x000000, 0.5)
+        );
+      }
+
+      // 이름(라벨 11px 금)
+      this.layer(
+        this.add
+          .text(CONTENT.x + 34, cy, meta.name, {
+            fontFamily: PIXEL_FONT,
+            fontSize: '11px',
+            color: C.gold
+          })
+          .setOrigin(0, 0.5)
+      );
+
+      // 보유 수량(우측 정렬, 수치 11px) — 0이면 흐리게.
+      const qty = this.add
+        .text(CONTENT.x + CONTENT.w - 8, cy, '0', {
+          fontFamily: PIXEL_FONT,
+          fontSize: '11px',
+          color: C.toxic
+        })
+        .setOrigin(1, 0.5);
+      qty.setShadow(1, 1, '#000000', 0, false, true);
+      this.layer(qty);
+
+      return { key, qty };
+    });
+
+    this.refreshActive = () => this.refreshInventory();
+    this.refreshInventory();
   }
 
-  // ── 스킬/인벤 스텁 ───────────────────────────────────────────────────
+  refreshInventory() {
+    this.invRows.forEach(({ key, qty }) => {
+      const n = GameState.materials[key] || 0;
+      qty.setText(String(n));
+      qty.setColor(n > 0 ? C.toxic : C.stub);
+    });
+  }
+
+  // ── 스킬 스텁 ────────────────────────────────────────────────────────
   buildStubTab(tab) {
     this.layer(
       this.add.text(CONTENT.x + 4, CONTENT.y + 6, tab.label, {

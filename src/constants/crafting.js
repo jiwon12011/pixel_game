@@ -30,7 +30,7 @@ export function defenseMultiplier(def) {
 //   atkBonus  — 플레이어 atk에 더해지는 무기 보너스
 //   cooldown  — 자동 공격 주기(ms). 낮을수록 빠름.
 //   requires  — 선행으로 보유해야 하는 무기 id(없으면 null)
-//   cost      — 합성 재료 { SCRAP, ELEC, POWDER }
+//   cost      — 합성 재료 { <재료키>: 수량 } (R7 — 실제 재료. materials.js MATERIAL_ORDER 키)
 //   mechanic  — 전투 특수효과(없으면 null)
 //     · shock : 히트 시 chance 확률로 대상 감전 → speed*slowMult, attackCooldown*cdMult, durationMs
 //     · pierce: 사거리 내 2번째 적에게 falloff 배율 추가타(관통타는 메카닉 트리거 제외)
@@ -58,7 +58,7 @@ export const WEAPON_RECIPES = {
     atkBonus: 8,
     cooldown: 630,
     requires: 'pipe_wrench',
-    cost: { SCRAP: 8, ELEC: 3 },
+    cost: { rusty_screws: 6, copper_wire_coil: 3 },
     mechanic: { type: 'shock', chance: 0.3, slowMult: 0.5, cdMult: 1.67, durationMs: 600 },
     attrTag: 'SHOCK',
     ability: '히트 30% 감전(감속)'
@@ -70,7 +70,7 @@ export const WEAPON_RECIPES = {
     atkBonus: 20,
     cooldown: 750,
     requires: 'electric_shock_wrench',
-    cost: { SCRAP: 15, ELEC: 6 },
+    cost: { scrap_metal_plate: 3, copper_wire_coil: 5, broken_circuit_board: 1 },
     mechanic: { type: 'pierce', falloff: 0.5 },
     attrTag: 'PIERCE',
     ability: '2번째 적 관통 ×0.5'
@@ -84,7 +84,7 @@ export const WEAPON_RECIPES = {
     atkBonus: 5,
     cooldown: 850,
     requires: null, // 투척 라인 독립 시작(근접 선행 불필요)
-    cost: { SCRAP: 5, POWDER: 5 },
+    cost: { rusty_screws: 3, small_fuel_canister: 2 },
     mechanic: { type: 'burn', chance: 0.5, dmgPerTick: 4, tickMs: 500, durationMs: 2000 },
     attrTag: 'FIRE',
     ability: '히트 50% 화상 도트'
@@ -96,7 +96,7 @@ export const WEAPON_RECIPES = {
     atkBonus: 12,
     cooldown: 1100,
     requires: 'molotov',
-    cost: { SCRAP: 10, POWDER: 8, ELEC: 2 },
+    cost: { scrap_metal_plate: 2, small_fuel_canister: 3, chemical_vial: 4 },
     mechanic: {
       type: 'toxic',
       chance: 0.35,
@@ -118,10 +118,3 @@ export const WEAPON_ORDER = [
   'molotov',
   'poison_gas_canister'
 ];
-
-// 파츠 표시 메타 — 색칩 + 라벨 (designer 스펙).
-export const PART_META = {
-  SCRAP: { label: 'SCRAP', color: 0x8a6a3a }, // 녹슨 철 칩(가독성 위해 베이스보다 밝게)
-  ELEC: { label: 'ELEC', color: 0x20ff9a }, // 청록
-  POWDER: { label: 'POWDER', color: 0xff6020 } // 주황
-};

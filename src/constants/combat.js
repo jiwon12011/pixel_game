@@ -21,6 +21,22 @@ export const PLAYER = {
   dangerThreshold: 0.25 // HP 비율 이하 → 위험 펄스
 };
 
+// ── 무기 손표시 (R7 #6) ─────────────────────────────────────────────────
+// stage_01은 맨손이라 장착 무기 아이콘을 손 근처에 오버레이한다. 헤드리스라 정확한
+// 손 픽셀 위치는 모르므로 추정값 — 육안 튜닝 전제로 여기 상수만 만지면 된다.
+//   offsetX     — 캐릭터 몸 중심(playerX) 기준 가로(+ = 전방/오른쪽). 손이 앞으로 나온 위치.
+//   heightRatio — groundY(발끝)에서 위로 charDisplayH*ratio 지점이 손 높이. 0=발, 1=머리끝.
+//   offsetY     — 손 높이 미세 보정 px(+아래).
+//   displaySize — 화면상 무기 표시 높이 px(원본 128에서 스케일 산출).
+//   angle       — 무기 기울기(°). 아이콘이라 살짝 기울여 쥔 느낌만.
+export const WEAPON_HAND = {
+  offsetX: 18,
+  heightRatio: 0.4,
+  offsetY: 0,
+  displaySize: 30,
+  angle: -22
+};
+
 // 적 타입별 스탯. 키는 텍스처 키(=파일명)와 1:1.
 // contactRange: 주인공에게 이 거리까지 접근하면 멈추고 근접 공격 시작.
 export const ENEMY_TYPES = {
@@ -235,4 +251,22 @@ export const MOTION = {
   // setDotTint에서 헬퍼 객체 { v:0→1 } 보간 → sprite.setTint 갱신. 누수 없음.
   dotBurnPulseMs: 380,        // 화상 tint half-period ms (Sine.inOut yoyo)
   dotToxicPulseMs: 560,       // 독 tint half-period ms
+
+  // ── 무기 장착 플러리시 (R7 motion) ────────────────────────────────────────
+  // "새 무기를 쥐었다" 체감 — 스케일 팝 + 각도 정착. reduced-motion 시 생략.
+  equipScaleFrom: 0.68,       // 장착 순간 시작 스케일 (→ 1로 Back.out)
+  equipAngleDelta: -14,       // 장착 순간 추가 기울기 ° (WEAPON_HAND.angle 기준 오프셋, 복귀)
+  equipFlourishMs: 200,       // 스케일 팝 + 각도 복귀 duration ms
+
+  // ── 런지 무기 스윙 (R7 motion) ───────────────────────────────────────────
+  // 런지 정점에서 무기를 살짝 전방으로 휘둘러 복귀. position은 update()가 처리하므로
+  // angle만 건드리면 된다. 누수 없음 — 모든 트윈이 onComplete에서 체인/종료.
+  lungeWeaponAngleDelta: 20,  // 런지 시 전방 스윙 추가 각도 °
+  lungeWeaponSwingMs: 80,     // 스윙 forward duration ms (lungeMs 55와 함께)
+
+  // ── 재료 줍기 팝 강화 (R7 motion) ───────────────────────────────────────
+  // 기존 상승+페이드에 스케일 팝 + 포물선 X 드리프트 추가.
+  matPopScaleFrom: 0.4,       // 팝 시작 스케일 ({ from, to }로 delay 후 점프)
+  matPopScaleMs: 130,         // 스케일 팝 duration ms (상승과 오버랩 의도)
+  matPopArcX: 10,             // 상승 중 포물선 X 드리프트 px (± 랜덤)
 };

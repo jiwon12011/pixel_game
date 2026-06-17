@@ -8,13 +8,17 @@ import factoryUrl from '../../assets/ai-generated/backgrounds/web/parallax_l2_fa
 import wreckageUrl from '../../assets/ai-generated/backgrounds/web/parallax_l3_wreckage.webp';
 import groundUrl from '../../assets/ai-generated/backgrounds/web/parallax_l4_ground.webp';
 
-// 주인공 — 진행도 stage_01(누더기 시작 버전). 원본 226x478 PNG(가벼움)라 직접 로드.
-import scrapperStage01Url from '../../assets/ai-generated/characters/progression/scrapper_stage_01.png';
+// 주인공 — 진행도 stage_01(누더기 시작 버전). 무손실 webp 사본(원본 226x478 그대로, 종횡비 유지).
+// 히어로 스프라이트라 무손실로 선명도 보존. footOriginY/originX는 같은 비율이라 영향 없음.
+// 재생성: npm run optimize:assets (characters 카테고리, 종횡비 유지·512px 상한·lossless)
+import scrapperStage01Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_01.webp';
 
-import tabCraftUrl from '../../assets/ai-generated/ui/individual/tab_crafting.png';
-import tabSkillUrl from '../../assets/ai-generated/ui/individual/tab_skill.png';
-import tabStatsUrl from '../../assets/ai-generated/ui/individual/tab_stats.png';
-import tabInventoryUrl from '../../assets/ai-generated/ui/individual/tab_inventory.png';
+// UI 탭 아이콘 4종 — 128px q85 webp 사본(탭바 28px 렌더라 충분). PNG 대비 ~95% 경량(초기 로드 -30%).
+// 재생성: npm run optimize:assets (ui 카테고리)
+import tabCraftUrl from '../../assets/ai-generated/ui/individual/web/tab_crafting.webp';
+import tabSkillUrl from '../../assets/ai-generated/ui/individual/web/tab_skill.webp';
+import tabStatsUrl from '../../assets/ai-generated/ui/individual/web/tab_stats.webp';
+import tabInventoryUrl from '../../assets/ai-generated/ui/individual/web/tab_inventory.webp';
 
 // 드롭 보상 아이콘 — 처치 즉시 줍기 연출에 필요하므로 선행 로드(IMAGE_MANIFEST).
 // 재생성: npm run optimize:assets (items 카테고리, 128px webp)
@@ -23,6 +27,16 @@ import scrapPartsUrl from '../../assets/ai-generated/items/individual/web/scrap_
 // 허브 아이콘 — 스킬/알림. 합성·스킬 탭에서만 쓰니 지연 로드(HUB_ITEM_MANIFEST).
 import skillPointUrl from '../../assets/ai-generated/items/individual/web/skill_point.webp';
 import notificationBadgeUrl from '../../assets/ai-generated/items/individual/web/notification_badge.webp';
+
+// 재료 아이콘 7종 — 전투 줍기/인벤/합성에서 모두 쓰여 선행 로드(소형 5~6KB).
+// 재생성: npm run optimize:assets (materials 카테고리, 128px webp q85)
+import matRustyScrewsUrl from '../../assets/ai-generated/items/materials/web/rusty_screws.webp';
+import matCopperWireCoilUrl from '../../assets/ai-generated/items/materials/web/copper_wire_coil.webp';
+import matSmallFuelCanisterUrl from '../../assets/ai-generated/items/materials/web/small_fuel_canister.webp';
+import matScrapMetalPlateUrl from '../../assets/ai-generated/items/materials/web/scrap_metal_plate.webp';
+import matOldBatteryCellUrl from '../../assets/ai-generated/items/materials/web/old_battery_cell.webp';
+import matChemicalVialUrl from '../../assets/ai-generated/items/materials/web/chemical_vial.webp';
+import matBrokenCircuitBoardUrl from '../../assets/ai-generated/items/materials/web/broken_circuit_board.webp';
 
 // 무기 아이콘 18종 — 합성 탭 첫 진입 시 지연 로드(WEAPON_MANIFEST). 키 = 무기 id(파일명).
 // 재생성: npm run optimize:assets (weapons 카테고리, 128px webp, lossless:false q85)
@@ -91,7 +105,15 @@ export const IMAGE_MANIFEST = [
   { key: TEX.TAB_INVENTORY, url: tabInventoryUrl },
   // 드롭 보상 아이콘 — 처치 즉시 줍기 연출에 필요해 선행 로드
   { key: TEX.COIN_REWARD, url: coinRewardUrl },
-  { key: TEX.SCRAP_PARTS, url: scrapPartsUrl }
+  { key: TEX.SCRAP_PARTS, url: scrapPartsUrl },
+  // 재료 7종 — 전투 줍기 토스트/팝 + 인벤/합성 공용. 키는 materials.js MATERIAL_META.iconKey와 1:1.
+  { key: 'mat-rusty-screws', url: matRustyScrewsUrl },
+  { key: 'mat-copper-wire-coil', url: matCopperWireCoilUrl },
+  { key: 'mat-small-fuel-canister', url: matSmallFuelCanisterUrl },
+  { key: 'mat-scrap-metal-plate', url: matScrapMetalPlateUrl },
+  { key: 'mat-old-battery-cell', url: matOldBatteryCellUrl },
+  { key: 'mat-chemical-vial', url: matChemicalVialUrl },
+  { key: 'mat-broken-circuit-board', url: matBrokenCircuitBoardUrl }
 ];
 
 // 무기 아이콘 18종 — 합성 탭 첫 진입 시 1회 지연 로드 후 캐시(키 = 무기 id).
