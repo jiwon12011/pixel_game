@@ -25,7 +25,8 @@ import {
   WEAPON_HAND,
   waveParams,
   ENEMY_MEMORY_MAP,
-  bossStatsForWave
+  bossStatsForWave,
+  isBossWave
 } from '../constants/combat.js';
 import { PIXEL_FONT, BODY_FONT, installCrispText } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
@@ -167,13 +168,13 @@ export default class CombatScene extends Phaser.Scene {
       try {
         this.maybeTransitionRegion(target);
         this.refillWaveShield();
-        // 보스 웨이브(%10)는 웨이브 배너 생략 — onEnemyKilled 경로와 동일 정책.
+        // 보스 웨이브(isBossWave)는 웨이브 배너 생략 — onEnemyKilled 경로와 동일 정책.
         // 보스 배너가 단독으로 등장해 과밀 없이 임팩트 집중.
-        if (target > 0 && target % 10 === 0) {
+        if (target > 0 && isBossWave(target)) {
           this.startBossEncounter(target);
         } else {
           this.showWaveBanner(target);
-          if (target > 0 && target % 5 === 0) this.showUpgradeOverlay(target);
+          if (target > 0 && target % 3 === 0) this.showUpgradeOverlay(target);
         }
       } catch (e) {
         console.error('[debug jump]', e);
@@ -357,6 +358,7 @@ export default class CombatScene extends Phaser.Scene {
     // (idleBobTween.resume 등)이 teardown 후에도 발화해 새 런 bob 상태가 꼬인다.
     // idle bob도 character/shadow 대상이라 함께 죽으므로 restartRun에서 startIdleBob으로 재생성.
     this.tweens.killTweensOf(this.character);
+    if (this.character?.active) this.character.setAngle(0); // lean 각도 잔류 방지
     this.tweens.killTweensOf(this.shadow);
     this.idleBobTween = null;
     this.shadowBobTween = null;
@@ -372,6 +374,7 @@ export default class CombatScene extends Phaser.Scene {
     if (this._weaponSwingProxy) {
       this.tweens.killTweensOf(this._weaponSwingProxy);
       this._weaponSwingProxy.offsetY = 0;
+      this._weaponSwingProxy.offsetX = 0;
     }
   }
 
@@ -589,10 +592,12 @@ export default class CombatScene extends Phaser.Scene {
   updateHandWeaponPos() {
     if (!this.weaponSprite) return;
     // _weaponSwingProxy.offsetY: 찹 스윙 중 y 오프셋(치켜들기=음수, 내려찍기=양수).
-    // idle/장착 시 0이므로 기존 정적 포즈에 영향 없음.
+    // _weaponSwingProxy.offsetX: 임팩트 순간 무기를 적 방향으로 내지르는 x 오프셋.
+    // idle/장착 시 둘 다 0이므로 기존 정적 포즈에 영향 없음.
     const swingOY = this._weaponSwingProxy?.offsetY ?? 0;
+    const swingOX = this._weaponSwingProxy?.offsetX ?? 0;
     this.weaponSprite.setPosition(
-      this.character.x + WEAPON_HAND.offsetX,
+      this.character.x + WEAPON_HAND.offsetX + swingOX,
       this.character.y - this.charDisplayH * WEAPON_HAND.heightRatio + WEAPON_HAND.offsetY + swingOY
     );
   }
@@ -605,11 +610,12 @@ export default class CombatScene extends Phaser.Scene {
     if (!this.weaponSprite || !this.motionOk) return;
 
     // 이전 플러리시·찹 스윙 트윈 정리 후 새 플러리시 시작.
-    // 스윙 프록시도 함께 정리해 장착 중 offsetY가 0으로 복귀되게 함.
+    // 스윙 프록시도 함께 정리해 장착 중 offsetY/offsetX가 0으로 복귀되게 함.
     this.tweens.killTweensOf(this.weaponSprite);
     if (this._weaponSwingProxy) {
       this.tweens.killTweensOf(this._weaponSwingProxy);
       this._weaponSwingProxy.offsetY = 0;
+      this._weaponSwingProxy.offsetX = 0;
     }
     this.weaponSprite
       .setScale(scale * MOTION.equipScaleFrom)
@@ -734,12 +740,25 @@ export default class CombatScene extends Phaser.Scene {
       if (weapon.mechanic?.type === 'pierce' && this.director) {
         const inRange = this.director.enemiesInRange(this.playerX, PLAYER.attackRange);
         const second = inRange.find((e) => e !== enemy && !e.dead);
-        if (second) this.dealDamage(second, base * weapon.mechanic.falloff, true);
+        if (second) {
+          this.dealDamage(second, base * weapon.mechanic.falloff, true);
+          // 관통 2차 타깃 — 슬래시+스파크(넉백은 연출 과밀 방지로 생략)
+          if (this.motionOk) {
+            const c = this._slashColorForWeapon();
+            this._spawnSlashVfx(second, c);
+            this._spawnImpactSparks(second, c);
+          }
+        }
       }
 
-      // 히트스톱 — director.update를 잠깐 중단해 임팩트 정지감
+      // 히트스톱 + 임팩트 VFX — 무기 chopImpactAngle 도달·런지 완료와 동기화
       if (this.motionOk) {
         this.hitStopUntil = this.time.now + MOTION.hitStopMs;
+        // 슬래시(검격 호)·스파크·적 넉백 — reduced-motion 시 이 블록 전체 생략
+        const slashColor = this._slashColorForWeapon();
+        this._spawnSlashVfx(enemy, slashColor);
+        this._spawnImpactSparks(enemy, slashColor);
+        this._applyEnemyKnockback(enemy);
       }
     };
 
@@ -781,7 +800,7 @@ export default class CombatScene extends Phaser.Scene {
     if (this.weaponSprite?.active) {
       this.tweens.killTweensOf(this.weaponSprite);
     }
-    if (!this._weaponSwingProxy) this._weaponSwingProxy = { offsetY: 0 };
+    if (!this._weaponSwingProxy) this._weaponSwingProxy = { offsetY: 0, offsetX: 0 };
     this.tweens.killTweensOf(this._weaponSwingProxy);
 
     // ── 1a: 무기 치켜들기 — anticipation과 동시 시작 ─────────────────────────────
@@ -793,9 +812,29 @@ export default class CombatScene extends Phaser.Scene {
         duration: MOTION.chopWindupMs,
         ease: 'Quad.out',
         onComplete: () => {
+          if (!this.weaponSprite?.active) return;
+
+          // ── 무기 잔상 — 내려찍기 직전 치켜든 위치에 반투명 ghost로 스피드감 강조 ──
+          // motionOk 안에서만 생성(reduced-motion 제외). onComplete destroy로 누수 0.
+          if (this.motionOk) {
+            const trail = this.add
+              .image(this.weaponSprite.x, this.weaponSprite.y, this.weaponSprite.texture.key)
+              .setDisplaySize(this.weaponSprite.displayWidth, this.weaponSprite.displayHeight)
+              .setAngle(this.weaponSprite.angle)
+              .setOrigin(0.5)
+              .setAlpha(0.46)
+              .setDepth(this.weaponSprite.depth - 1);
+            this.tweens.add({
+              targets: trail,
+              alpha: 0,
+              duration: 85,
+              ease: 'Quad.in',
+              onComplete: () => { if (trail.active) trail.destroy(); }
+            });
+          }
+
           // ── 2a: 무기 내려찍기 — 런지와 동시 ──────────────────────────────────
           // Expo.in: 처음엔 느리다가 임팩트 직전 "쾅" 가속. 총 호 160° 빠른 스윙.
-          if (!this.weaponSprite?.active) return;
           this.tweens.add({
             targets: this.weaponSprite,
             angle: MOTION.chopImpactAngle,
@@ -832,12 +871,14 @@ export default class CombatScene extends Phaser.Scene {
       duration: MOTION.anticipationMs,
       ease: 'Quad.out',
       onComplete: () => {
-        // ── 2c: 캐릭터 런지 — 내려찍는 순간에 앞으로 스트레치 ─────────────────
+        // ── 2c: 캐릭터 런지 — 내려찍는 순간에 앞으로 스트레치 + 몸 기울임 ──────
+        // leanAngle: 발 pivot(footOriginY≈0.96) 기준 CW 기울기 — "몸을 앞으로 숙이며 내려치는" 인상.
         this.tweens.add({
           targets: this.character,
           x: this.playerX + MOTION.lungeX,
           scaleX: this.charScale * MOTION.lungeScaleX,
           scaleY: this.charScale * MOTION.lungeScaleY,
+          angle: MOTION.leanAngle,
           duration: MOTION.lungeMs,
           ease: 'Expo.out',
           onComplete: () => {
@@ -872,14 +913,29 @@ export default class CombatScene extends Phaser.Scene {
               ease: 'Back.out'
             });
 
-            // ── 3c: 캐릭터 복귀 — 탄성 있게 원위치 ─────────────────────────────
+            // ── 3b': 무기 리치(thrust) — 임팩트 순간 무기를 적 방향으로 순간 내질러 "닿는" 인상 ──
+            // 몸이 앞으로 안 가는 대신 무기가 찔러나가며 타격을 주도한다.
+            // 스냅(즉각 오프셋 세팅) → Back.out 탄성 복귀 = 채찍 느낌.
+            if (this._weaponSwingProxy) {
+              this._weaponSwingProxy.offsetX = MOTION.weaponThrustPx;
+              this.tweens.add({
+                targets: this._weaponSwingProxy,
+                offsetX: 0,
+                duration: MOTION.chopRecoveryMs,
+                ease: 'Back.out'
+              });
+            }
+
+            // ── 3c: 캐릭터 복귀 — 탄성 오버슈트로 원위치 (angle도 0으로) ──────
+            // Back.out(2.2): 기본값(1.70)보다 오버슈트 크게 — "살아있는 반동" 강화.
             this.tweens.add({
               targets: this.character,
               x: this.playerX,
               scaleX: this.charScale,
               scaleY: this.charScale,
+              angle: 0,
               duration: MOTION.recoveryMs,
-              ease: 'Back.out',
+              ease: 'Back.out(2.2)',
               onComplete: () => {
                 // 정상 복귀 — 워치독 취소 후 평상 상태로.
                 this._attackWatchdog?.remove(false);
@@ -890,6 +946,114 @@ export default class CombatScene extends Phaser.Scene {
             });
           }
         });
+      }
+    });
+  }
+
+  // ── 임팩트 VFX 헬퍼 ─────────────────────────────────────────────────────────
+  // motionOk=true 전용. apply() 안에서 호출. 누수 0: onComplete에서 Graphics.destroy().
+
+  // 무기 속성 태그 → 슬래시/스파크 색 (COMBAT_COLORS + 인라인 리터럴 혼용)
+  _slashColorForWeapon() {
+    const tag = this.currentWeapon()?.attrTag ?? 'PHYSICAL';
+    switch (tag) {
+      case 'FIRE':   return COMBAT_COLORS.burnGlow;   // 0xff5500 주황-적
+      case 'TOXIC':  return COMBAT_COLORS.toxicGlow;  // 0x33ff77 형광 녹
+      case 'SHOCK':  return COMBAT_COLORS.shock;      // 0x66ddff 청록
+      case 'PIERCE': return 0x88ccff;                 // 하늘청 (관통)
+      default:       return 0xfff0d0;                 // PHYSICAL — 따뜻한 흰/금
+    }
+  }
+
+  // 검격 호(슬래시) VFX — 임팩트 지점에 두꺼운 호 선(흰+속성 색)을 그려
+  // 스케일업+페이드로 소멸. 무기 스윙 방향(-100°→+48°)과 정렬.
+  _spawnSlashVfx(enemy, color) {
+    if (!enemy?.container?.active) return;
+    const depth = this.parallax.topDepth + 3;
+    // 슬래시 중심: 적 상체(발에서 절반 높이 위)
+    const cx = enemy.container.x - 5;
+    const cy = enemy.container.y - (enemy.displayHeight ?? 28) * 0.55;
+    const startRad = Phaser.Math.DegToRad(MOTION.slashStartDeg);
+    const endRad   = Phaser.Math.DegToRad(MOTION.slashEndDeg);
+
+    const g = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+
+    // 외선 — 흰색 굵게 (타격 에너지 질감). 4.5px로 더 또렷하게.
+    g.lineStyle(4.5, 0xffffff, 0.94);
+    g.strokeArc(0, 0, MOTION.slashOuterR, startRad, endRad, false);
+
+    // 내선 — 속성 색 (무기 원소 질감). 2.5px로 강화.
+    g.lineStyle(2.5, color, 0.88);
+    g.strokeArc(0, 0, MOTION.slashInnerR, startRad + 0.18, endRad - 0.12, false);
+
+    this.tweens.add({
+      targets: g,
+      scaleX: MOTION.slashScaleTo,
+      scaleY: MOTION.slashScaleTo,
+      alpha: 0,
+      duration: MOTION.slashDurationMs,
+      ease: 'Quad.out',
+      onComplete: () => { if (g.active) g.destroy(); }
+    });
+  }
+
+  // 방사형 스파크 VFX — 타격 지점 중심에서 짧은 선분들이 방사 후 페이드.
+  // Graphics 선분 + 중심 점으로 픽셀 아트 타격감 강조.
+  _spawnImpactSparks(enemy, color) {
+    if (!enemy?.container?.active) return;
+    const depth = this.parallax.topDepth + 3;
+    const cx = enemy.container.x - 4;
+    const cy = enemy.container.y - (enemy.displayHeight ?? 28) * 0.5;
+
+    const g = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+    const count = MOTION.sparkCount;
+
+    for (let i = 0; i < count; i++) {
+      // 각도: 오버헤드 찹 방향(좌상→우하) 중심으로 부채꼴 분산
+      const baseAngle = -Math.PI * 0.55; // 약 -100° (무기 내려찍기 방향)
+      const angle = baseAngle + (Math.PI * 1.2 / (count - 1)) * i;
+      const innerR = 2 + Math.random() * 2;
+      const outerR = innerR + 6 + Math.random() * 7; // 4+5 → 6+7: 스파크 선 길게 강화
+      // 홀짝으로 흰/속성 색 혼합 — 단색 모노톤 방지. 선 두께 1.5→2 밝기 강화.
+      g.lineStyle(2, i % 2 === 0 ? 0xffffff : color, 0.95);
+      g.beginPath();
+      g.moveTo(Math.cos(angle) * innerR, Math.sin(angle) * innerR);
+      g.lineTo(Math.cos(angle) * outerR, Math.sin(angle) * outerR);
+      g.strokePath();
+    }
+    // 중심 점 — "충격 핵" 시각화. 2.5→3으로 약간 키워 존재감 강화.
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(0, 0, 3);
+
+    this.tweens.add({
+      targets: g,
+      alpha: 0,
+      scaleX: 1.4,
+      scaleY: 1.4,
+      duration: MOTION.sparkDurationMs,
+      ease: 'Quad.out',
+      onComplete: () => { if (g.active) g.destroy(); }
+    });
+  }
+
+  // 적 넉백 — 피격 적을 플레이어 반대 방향(우측)으로 worldX 트윈.
+  // yoyo=true로 되돌아와 위치 정확히 복구. 보스는 절반 거리.
+  // Enemy.update가 매 프레임 syncPosition(worldX 기반)을 호출하므로 트윈이 즉시 시각 반영됨.
+  _applyEnemyKnockback(enemy) {
+    if (!enemy || enemy.dead) return;
+    const dist = enemy.isBoss
+      ? Math.max(1, Math.round(MOTION.knockbackPx * 0.35))
+      : MOTION.knockbackPx;
+    const origX = enemy.worldX;
+    this.tweens.add({
+      targets: enemy,
+      worldX: origX + dist,
+      duration: MOTION.knockbackMs,
+      ease: 'Quad.out',
+      yoyo: true,
+      onComplete: () => {
+        // yoyo 복귀 후 부동소수 오차 제거 — 생존 중일 때만(사망 중엔 worldX가 이미 의미 없음)
+        if (!enemy.dead) enemy.worldX = origX;
       }
     });
   }
@@ -905,11 +1069,13 @@ export default class CombatScene extends Phaser.Scene {
     if (this._weaponSwingProxy) {
       this.tweens.killTweensOf(this._weaponSwingProxy);
       this._weaponSwingProxy.offsetY = 0;
+      this._weaponSwingProxy.offsetX = 0;
     }
     if (this.character?.active) {
       this.tweens.killTweensOf(this.character);
       this.character.x = this.playerX;
       this.character.setScale(this.charScale);
+      this.character.setAngle(0); // 런지 lean 각도 리셋
     }
     this.idleBobTween?.resume();
   }
@@ -931,16 +1097,17 @@ export default class CombatScene extends Phaser.Scene {
         try {
           this.maybeTransitionRegion(wi); // 지역 경계 넘으면 배경 크로스페이드
           // 웨이브 사이드이펙트 조율:
-          //   · %10(보스 웨이브) → 웨이브 배너 생략. 보스 배너/HP바가 더 강한 임팩트로 대체해
+          //   · 보스 웨이브(isBossWave: 5,12,19…) → 웨이브 배너 생략. 보스 배너/HP바가 더 강한 임팩트로 대체해
           //     0.3H(웨이브)+0.46H(보스) 동시 과밀을 방지하고 보스 등장에 화면을 집중시킨다.
           //     업그레이드 오버레이는 "보스 처치 보상"으로 미룬다.
-          //   · 그 외 %5 → 기존 R9 웨이브 업그레이드(런 한정 버프). 사망/오버레이와 겹침 가드는 내부에.
+          //   · 비보스 + %3 → 기존 R9 웨이브 업그레이드(런 한정 버프). 사망/오버레이와 겹침 가드는 내부에.
+          //     (else 안이라 보스 웨이브와 자동으로 안 겹침.)
           //   · 나머지 → 웨이브 배너만.
-          if (wi > 0 && wi % 10 === 0) {
+          if (wi > 0 && isBossWave(wi)) {
             this.startBossEncounter(wi);
           } else {
             this.showWaveBanner(wi);
-            if (wi > 0 && wi % 5 === 0) this.showUpgradeOverlay(wi);
+            if (wi > 0 && wi % 3 === 0) this.showUpgradeOverlay(wi);
           }
         } catch (e) {
           console.error('[wave side-effect]', e);
@@ -2035,8 +2202,8 @@ export default class CombatScene extends Phaser.Scene {
     this.playerHP = this.maxHP;
     this.updateHpBar();
     this.character.clearTint();
-    // teardown이 런지/idle 트윈을 죽여 x/y/scale이 중간값으로 멈췄을 수 있으니 기준값 복원
-    this.character.setPosition(this.playerX, this.groundY).setScale(this.charScale);
+    // teardown이 런지/idle 트윈을 죽여 x/y/scale/angle이 중간값으로 멈췄을 수 있으니 기준값 복원
+    this.character.setPosition(this.playerX, this.groundY).setScale(this.charScale).setAngle(0);
     this.shadow.setScale(1).setAlpha(0.35); // 그림자 bob 기준값 복원
     this.startIdleBob(); // bob 재생성 — 이후 playerAttack의 pause/resume가 정상 동작
     // 새 런 단계 복구 — startNewRun이 런 스냅샷을 리셋했으면 stage1(맨손). 텍스처/origin/scale 복원.
@@ -2333,8 +2500,8 @@ export default class CombatScene extends Phaser.Scene {
   createHud() {
     const x = 10;
     const y = 8;
-    const w = 132;
-    const h = 13;
+    const w = 100; // designer: 132→100 — 길고 평평한 인상 완화, 좌측 컬럼 응집
+    const h = 12;
     this.hpBarW = w;
 
     this.add
@@ -2349,9 +2516,14 @@ export default class CombatScene extends Phaser.Scene {
       .rectangle(x + 1, y + 1, w, h, COMBAT_COLORS.gold)
       .setOrigin(0, 0)
       .setDepth(61);
+    // 상단 1px 광택 하이라이트 — 평평한 바에 입체감(채움 위, 트랙 폭 고정).
+    this.add
+      .rectangle(x + 1, y + 1, w, 1, 0xffffff, 0.22)
+      .setOrigin(0, 0)
+      .setDepth(62);
 
     this.add
-      .text(x, 28, 'SCRAPPER', {
+      .text(x, 26, 'SCRAPPER', {
         fontFamily: PIXEL_FONT,
         fontSize: '10px',
         color: '#cbb89a'
@@ -2372,7 +2544,7 @@ export default class CombatScene extends Phaser.Scene {
   createWaveHud() {
     const x = 10;
     this.waveText = this.add
-      .text(x, 44, 'WAVE 0', {
+      .text(x, 42, 'WAVE 0', {
         fontFamily: PIXEL_FONT,
         fontSize: '13px',
         color: '#ff6020'
@@ -2384,7 +2556,7 @@ export default class CombatScene extends Phaser.Scene {
     // RUN #N — WAVE 옆(바 우측 끝선), 회차 표식. WAVE보다 위계상 위라 골드(#f0c040,
     // 사망 오버레이 RUN과 동일 톤)로 구분. 현재 진행 런 = runCount+1(사망 오버레이와 동일).
     this.runText = this.add
-      .text(82, 44, '', {
+      .text(78, 42, '', {
         fontFamily: PIXEL_FONT,
         fontSize: '13px',
         color: '#f0c040'
@@ -2393,7 +2565,7 @@ export default class CombatScene extends Phaser.Scene {
       .setDepth(61);
     this.runText.setShadow(1, 1, '#000000', 0, false, true);
 
-    const barY = 62;
+    const barY = 60;
     this.waveBarW = 72;
     this.add
       .rectangle(x, barY, this.waveBarW + 2, 6, 0x000000, 0.55)
@@ -2497,7 +2669,8 @@ export default class CombatScene extends Phaser.Scene {
   // R7 — 재료는 인벤 탭에서 본다(전투 HUD는 코인만). 코인 줍기가 빨려드는 목적지.
   createResourceHud() {
     const y = 14;
-    const x = LOGICAL.width - 54;
+    // 상단 가운데 — 아이콘(16) + 숫자 묶음이 화면 중앙에 오게 좌측 시작점을 보정.
+    const x = Math.round(LOGICAL.width / 2 - 16);
     if (this.textures.exists(TEX.COIN_REWARD)) {
       const src = this.textures.get(TEX.COIN_REWARD).getSourceImage();
       this.add
@@ -2530,34 +2703,49 @@ export default class CombatScene extends Phaser.Scene {
   // 오프셋 뷰포트 환경에서 per-object setInteractive가 어긋나는 걸 피하는 기존 패턴 그대로).
   // 탭하면 SettingsScene을 launch(전체 화면 모달).
   createSettingsButton() {
-    const w = 18;
-    const h = 16;
-    const x = LOGICAL.width - w - 4;
-    const y = 28;
+    const w = 24; // designer: 18→24 — 작아서 톱니 디테일이 죽던 걸 키움
+    const h = 20;
+    const x = LOGICAL.width - w - 4; // 맨 우상단 코너
+    const y = 6; // 상단 코너 — 코인(좌측)과 같은 띠, x로 분리
     this._settingsBounds = { x, y, w, h };
 
-    this.add
-      .rectangle(x, y, w, h, 0x000000, 0.5)
-      .setOrigin(0, 0)
-      .setStrokeStyle(1, 0x5a4631, 0.9)
-      .setDepth(62);
+    // 배경 박스(유저 거부) 대신 은은한 원형 링 테두리로 "버튼"임을 암시 — 부동감 해소.
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const ring = this.add.graphics().setDepth(62);
+    ring.fillStyle(0x000000, 0.18); // 톱니 뒤 아주 옅은 다크 원(대비 받침)
+    ring.fillCircle(cx, cy, 10.5);
+    ring.lineStyle(1, 0xf0c040, 0.45); // 금색 1px 링
+    ring.strokeCircle(cx, cy, 10.5);
     const g = this.add.graphics().setDepth(63);
-    this._drawGear(g, x + w / 2, y + h / 2, 5, 0xf0c040);
+    this._drawGear(g, cx, cy, 0xf0c040);
   }
 
-  // 픽셀 톱니 — 8방향 이빨(작은 사각) + 본체 원 + 가운데 어두운 구멍. clear→재드로 안전.
-  _drawGear(g, cx, cy, r, color) {
+  // 톱니 아이콘 — 8개 이빨(사다리꼴) + 작은 본체 링 + 가운데 구멍.
+  // 핵심: 본체 반경(3.0) < 이빨 안쪽(4.5)이라 톱니가 본체 앞으로 확실히 돌출 → "기어"로 읽힘.
+  _drawGear(g, cx, cy, color) {
     g.clear();
-    g.fillStyle(color, 1);
-    for (let i = 0; i < 8; i++) {
-      const a = (i * Math.PI) / 4;
-      const tx = cx + Math.cos(a) * (r + 2);
-      const ty = cy + Math.sin(a) * (r + 2);
-      g.fillRect(Math.round(tx - 1.5), Math.round(ty - 1.5), 3, 3);
-    }
-    g.fillCircle(cx, cy, r);
-    g.fillStyle(0x1a1008, 1); // 가운데 구멍
-    g.fillCircle(cx, cy, r * 0.42);
+    const rHole = 1.5; // 가운데 구멍(작게 — 링 비율 강화)
+    const half = 0.35; // 이빨 각폭(라디안) 절반
+
+    // 톱니+본체 한 패스 — 어두운 외곽선 → 금색 본체 2패스로 대비 확보.
+    const draw = (col, rBody, rToothIn, rToothOut, tHalf) => {
+      g.fillStyle(col, 1);
+      for (let i = 0; i < 8; i++) {
+        const a = (i * Math.PI) / 4;
+        const p = (rad, da) => ({ x: cx + Math.cos(a + da) * rad, y: cy + Math.sin(a + da) * rad });
+        g.fillPoints(
+          [p(rToothIn, -tHalf), p(rToothIn, tHalf), p(rToothOut, tHalf * 1.25), p(rToothOut, -tHalf * 1.25)],
+          true
+        );
+      }
+      g.fillCircle(cx, cy, rBody);
+    };
+
+    draw(0x000000, 3.8, 4.5, 9.5, half + 0.12); // 외곽선(살짝 크게, 어둡게)
+    draw(color, 3.0, 4.5, 8.5, half); // 본체(금색) — rBody<rToothIn이 핵심
+    g.fillStyle(0x000000, 1); // 가운데 구멍
+    g.fillCircle(cx, cy, rHole);
   }
 
   // ── 드롭 줍기 연출 ─────────────────────────────────────────────────────

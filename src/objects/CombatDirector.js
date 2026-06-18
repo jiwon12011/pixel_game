@@ -180,7 +180,9 @@ export default class CombatDirector {
     for (const e of this.enemies) {
       if (e.dead) continue;
       const dist = e.worldX - px;
-      if (dist <= range && dist < bestDist) {
+      // 사거리 안이거나, 이미 정지해 근접공격 중(inRange)이면 대상. 후자는 보스처럼
+      // contactRange > attackRange라 사거리 밖에 멈추는 적을 반격 못 하던 버그를 막는다.
+      if ((dist <= range || e.inRange) && dist < bestDist) {
         best = e;
         bestDist = dist;
       }
@@ -188,10 +190,10 @@ export default class CombatDirector {
     return best;
   }
 
-  // 사거리 내 살아있는 적을 가까운 순으로(관통 메카닉의 2번째 타깃 선택용).
+  // 사거리 내(또는 근접공격 중) 살아있는 적을 가까운 순으로(관통 2번째 타깃·탭공격용).
   enemiesInRange(px, range) {
     return this.enemies
-      .filter((e) => !e.dead && e.worldX - px <= range)
+      .filter((e) => !e.dead && (e.worldX - px <= range || e.inRange))
       .sort((a, b) => a.worldX - b.worldX);
   }
 

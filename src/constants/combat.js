@@ -124,13 +124,13 @@ export function waveParams(w) {
   };
 }
 
-// ── 보스 (10웨이브마다 인카운터) ─────────────────────────────────────────
+// ── 보스 (첫 보스 wave 5, 이후 7웨이브마다 — isBossWave/BOSS_INTERVAL_WAVES) ──
 // 일반 적과 같은 Enemy 인프라를 재사용한다(typeKey=보스키 + cfg.def/maxHP 주입).
 // HP가 매우 높고·느리고·크다(스케일은 displayHeight로 산출 — 일반 적 108~145의 ~1.7배).
-// 등장 순서: 10=colossus, 20=herald, 30=colossus … (bossKeyForWave가 번갈아 반환).
+// 등장 순서: 회차 0=colossus, 1=herald, 2=colossus … (bossKeyForWave가 회차 홀짝으로 번갈아 반환).
 //   reward — 처치 보상. 희귀 재료(grade≥2) 2~3종 확정 + 코인. 코인은 보스 깊이로 가산(scene).
 export const BOSS_TYPES = {
-  // 콜로서스 — 느리지만 압도적으로 단단·묵직한 일격. 첫 보스(웨이브 10).
+  // 콜로서스 — 느리지만 압도적으로 단단·묵직한 일격. 첫 보스(웨이브 5, 회차 0).
   colossus_boss: {
     maxHP: 760,
     speed: 15,
@@ -141,7 +141,7 @@ export const BOSS_TYPES = {
     name: '콜로서스',
     reward: { coins: 140, materials: { scrap_metal_plate: 3, old_battery_cell: 2, broken_circuit_board: 1 } }
   },
-  // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 20).
+  // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 12, 회차 1).
   the_herald_boss: {
     maxHP: 600,
     speed: 23,
@@ -154,20 +154,39 @@ export const BOSS_TYPES = {
   }
 };
 
-// 보스 등장 웨이브 → 보스 키. 10→colossus, 20→herald, 30→colossus … (tier 홀짝으로 번갈아).
+// ── 보스 등장 주기 (단일 출처) ─────────────────────────────────────────────
+// 첫 보스 wave 5, 이후 7웨이브마다 → 5, 12, 19, 26, 33 …
+// 보스 종류/티어는 "웨이브 번호"가 아니라 "몇 번째 보스인가"(occurrence index)로 파생한다.
+export const FIRST_BOSS_WAVE = 5;
+export const BOSS_INTERVAL_WAVES = 7;
+
+// w가 보스 웨이브인가.
+export function isBossWave(w) {
+  return w === FIRST_BOSS_WAVE || (w > FIRST_BOSS_WAVE && (w - FIRST_BOSS_WAVE) % BOSS_INTERVAL_WAVES === 0);
+}
+
+// 0-based 보스 회차(첫 보스=0, 다음=1 …). 첫 보스 이전 웨이브엔 -1.
+// 비보스 웨이브에선 "가장 최근에 등장했거나 등장할 보스" 기준으로 floor 처리.
+export function bossOccurrenceIndex(w) {
+  if (w < FIRST_BOSS_WAVE) return -1;
+  return Math.floor((w - FIRST_BOSS_WAVE) / BOSS_INTERVAL_WAVES);
+}
+
+// 보스 등장 웨이브 → 보스 키. 회차 0=colossus, 1=herald, 2=colossus … (회차 홀짝으로 번갈아).
 export function bossKeyForWave(w) {
-  const tier = Math.floor(w / 10); // 10→1, 20→2 …
-  return tier % 2 === 1 ? 'colossus_boss' : 'the_herald_boss';
+  const i = bossOccurrenceIndex(w);
+  return i % 2 === 0 ? 'colossus_boss' : 'the_herald_boss';
 }
 
 // 보스 등장 웨이브 → { key, def, tier, maxHP, damage }.
 // HP는 보스 베이스에 (waveParams.hpMult + 0.6·tier)를 곱해 잡몹 강화 곡선과 결을 맞추되,
 // hpMult가 캡(2.8)에 닿은 뒤에도 깊은 보스가 계속 단단해지도록 tier 가산항을 더한다.
-// damage는 tier마다 +12%로 완만히(즉사 방지). tier: 10→0, 20→1, 30→2 …
+// damage는 tier마다 +12%로 완만히(즉사 방지). tier = 보스 회차(첫 보스=0).
+// ※ 첫 보스가 wave 5라 waveParams(5).hpMult가 낮아 자연히 약함(과한 HP벽 방지).
 export function bossStatsForWave(w) {
   const key = bossKeyForWave(w);
   const base = BOSS_TYPES[key];
-  const tier = Math.max(0, Math.floor(w / 10) - 1);
+  const tier = Math.max(0, bossOccurrenceIndex(w));
   const hpMult = waveParams(w).hpMult + 0.6 * tier;
   return {
     key,
@@ -218,14 +237,15 @@ export const COMBAT_CSS = {
 // 단위: ms(시간), px(거리), 비율(0~1).
 export const MOTION = {
   // ── 주인공 공격 3단계 (레트로 계단식 느낌 위해 duration을 짧게 끊음) ──
-  anticipationMs: 70,       // 뒤로 당기는 예비동작
-  anticipationX: -5,        // 뒤로 이동 px
-  anticipationScaleX: 0.90, // 가로 쪼그라들기
-  anticipationScaleY: 1.07, // 세로 늘어나기
-  lungeMs: 55,              // 돌진 — 짧고 빠를수록 임팩트↑
-  lungeX: 22,               // 앞으로 이동 px
-  lungeScaleX: 1.14,        // 가로 늘어나기 (스트레치)
+  anticipationMs: 90,       // 뒤로 당기는 예비동작 (70→90: 더 길게 당겨 와인드업 대비 강화)
+  anticipationX: -9,        // 뒤로 이동 px (-2→-9: 확실히 당겨 일격 대비 만들기)
+  anticipationScaleX: 0.88, // 가로 쪼그라들기 (0.90→0.88: 더 강한 스쿼시)
+  anticipationScaleY: 1.10, // 세로 늘어나기 (1.07→1.10)
+  lungeMs: 45,              // 돌진 — 짧고 빠를수록 임팩트↑ (55→45: 더 빠른 스냅)
+  lungeX: 16,               // 앞으로 이동 px (3→16: 전진 부활, 이전 22보다 절제)
+  lungeScaleX: 1.18,        // 가로 늘어나기 (스트레치 유지)
   lungeScaleY: 0.87,        // 세로 쪼그라들기
+  leanAngle: 7,             // 런지 순간 캐릭터 앞으로 기울임 ° (Phaser CW=양수, 발 기준 pivot)
   recoveryMs: 120,          // 캐릭터 원위치 복귀 — chopRecoveryMs(150)보다 30ms 짧아 캐릭터가 먼저 제자리에 안착
 
   // ── 히트스톱 ─────────────────────────────────────────────────────────
@@ -331,14 +351,30 @@ export const MOTION = {
   //   캐릭터 예비동작과 무기 치켜들기가, 런지와 내려찍기가 같은 타이밍에 끝난다.
   chopWindupAngle: -108,       // 치켜든 각도 ° (CCW, 절대값; 헤드 상향)
   chopWindupOffsetY: -24,      // 치켜드는 동안 y 오프셋 px — 음수=위(손 올라감 강조)
-  chopWindupMs: 70,            // windup duration ms (= anticipationMs, 동기)
+  chopWindupMs: 90,            // windup duration ms (= anticipationMs 90, 동기)
   chopImpactAngle: 52,         // 내려찍기 각도 ° (CW, 절대값; 헤드 하향)
   chopImpactOffsetY: 5,        // 임팩트 y 오프셋 px — 살짝 아래로(충격 진동감)
-  chopImpactMs: 55,            // 내려찍기 duration ms (= lungeMs, 동기) / Expo.in 가속
+  chopImpactMs: 45,            // 내려찍기 duration ms (= lungeMs 45, 동기) / Expo.in 가속
   chopRecoveryMs: 150,         // 무기 각도/offsetY 복귀 — recoveryMs(120)보다 30ms 더 길어 캐릭터가 먼저 안착하고 무기가 살짝 뒤따라 내려오는 "여운" 의도(동기화 원하면 120으로 통일)
   // ── 임팩트 보강 ──────────────────────────────────────────────────────────
-  chopShakeIntensity: 0.0035,  // cameras.main.shake 강도 (0.003~0.005 권고, 과하면 멀미)
+  chopShakeIntensity: 0.0045,  // cameras.main.shake 강도 (0.0035→0.0045: 임팩트 강화)
   chopShakeMs: 70,             // 셰이크 duration ms
+
+  // ── 임팩트 VFX — 슬래시(검격 호)·스파크·적 넉백 ────────────────────────────
+  // motionOk=true 전용. 무기 내려찍기(chopImpactAngle) 완료와 동시 발생 — 데미지 apply 직후.
+  // depth: parallax.topDepth+3 (캐릭터+1 · 적+1 위, 무기+5 아래).
+  slashOuterR: 32,      // 슬래시 외호 반지름 px (22→32: 더 크고 또렷하게 — 공격 초점을 슬래시로)
+  slashInnerR: 18,      // 슬래시 내호(색 선) 반지름 px (12→18)
+  slashStartDeg: -100,  // 슬래시 호 시작 각도 ° — chopWindupAngle 방향과 정렬(위-뒤)
+  slashEndDeg: 48,      // 슬래시 호 끝 각도 ° — chopImpactAngle 방향(아래-앞)
+  slashDurationMs: 190, // 슬래시 페이드아웃 duration ms (150→190: 잔상 여유 확보)
+  slashScaleTo: 2.1,    // 슬래시 스케일업 목표 (1.75→2.1: 더 크게 확산)
+  sparkCount: 7,        // 방사형 스파크 선 개수 (5→7: 밀도 강화)
+  sparkDurationMs: 110, // 스파크 페이드아웃 duration ms
+  knockbackPx: 8,       // 피격 적 넉백 거리 px (플레이어 반대 방향 = 우측)
+  knockbackMs: 80,      // 넉백 1방향 duration ms (yoyo=true로 왕복 후 원위치)
+  weaponThrustPx: 9,    // 임팩트 순간 무기를 적 방향으로 내지르는 X 오프셋 px
+  // 내지르기 복귀 duration은 별도 상수 없이 chopRecoveryMs를 공유한다(무기 angle/offsetY 복귀와 동기).
 
   // ── 재료 줍기 팝 강화 (R7 motion) ───────────────────────────────────────
   // 기존 상승+페이드에 스케일 팝 + 포물선 X 드리프트 추가.
