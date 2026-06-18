@@ -3,21 +3,21 @@
 // 한글은 BODY_FONT + 아래 installCrispText(2배 해상도)로 선명하게 그린다.
 export const PIXEL_FONT = '"Galmuri11", monospace';
 export const BODY_FONT =
-  'system-ui, -apple-system, "Apple SD Gothic Neo", "Segoe UI", sans-serif';
+  '"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif';
 
 // PreloadScene에서 텍스트 생성 전에 폰트 로드를 기다릴 대상
 export const PRELOAD_FONTS = ['16px "Galmuri11"', 'bold 16px "Galmuri11"'];
 
-// designer 폰트 표 (R10 가독성 상향). 픽셀폰트=타이틀/영문/숫자, BODY_FONT=한글 본문/이름/라벨.
-//  · title  15px — 섹션 타이틀(금)
-//  · label  11px — 라벨/주요 수치
-//  · value  12px — 보조 수치/버튼(재료 수량 등)
-//  · body   11px — 설명 문장(BODY_FONT) — 9~10px는 모바일 dpr2~3에서 한글 뭉개져 폐기
+// designer 폰트 표 (R11 가독성 상향). 픽셀폰트=타이틀/영문/숫자, BODY_FONT=한글 본문/이름/라벨.
+//  · title  17px — 섹션 타이틀(금)
+//  · label  13px — 라벨/주요 수치
+//  · value  13px — 보조 수치/버튼(재료 수량 등)
+//  · body   13px — 설명 문장(BODY_FONT) — 9~11px는 모바일 dpr2~3에서 한글 뭉개져 상향
 export const FONT_SIZE = {
-  title: '15px',
-  label: '11px',
-  value: '12px',
-  body: '11px'
+  title: '17px',
+  label: '13px',
+  value: '13px',
+  body: '13px'
 };
 
 // 자주 쓰는 텍스트 색 — 설명 본문 톤 + 충분/부족 신호색(designer).
@@ -31,7 +31,9 @@ export const FONT_COLOR = {
 // 어두운 배경 텍스트 가독용 1px 검정 그림자 — t.setShadow(...TEXT_SHADOW) 로 적용.
 export const TEXT_SHADOW = [1, 1, '#000000', 0, false, true];
 
-// 텍스트 선명화 배율 — pixelArt:true 게임은 벡터 텍스트도 NEAREST로 뭉개므로 2배 해상도로 렌더.
+// 텍스트 선명화 배율 — 텍스트 텍스처를 N배 해상도로 렌더(업스케일 뭉갬 완화).
+// 백버퍼가 720(gameSize=LOGICAL×2)이고 카메라 줌이 2라, 13px 폰트는 백버퍼에서 26px로 그려진다.
+// resolution 2면 텍스처도 26px → 백버퍼 픽셀과 1:1 매칭(최적). 3이면 minify 과잉(메모리 낭비)이라 2로.
 export const TEXT_RESOLUTION = 2;
 
 // 씬의 텍스트 팩토리(this.add.text)를 1회 감싸 모든 텍스트에

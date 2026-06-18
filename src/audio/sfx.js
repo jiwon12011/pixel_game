@@ -10,15 +10,21 @@
 
 const isBrowser = typeof window !== 'undefined';
 const STORAGE_KEY = 'ls_muted';
+const SFXVOL_KEY = 'ls_sfxvol'; // SFX 버스 볼륨(0~1)
+const BGMVOL_KEY = 'ls_bgmvol'; // BGM 버스 볼륨(0~1)
 
 const MASTER_VOLUME = 0.5; // 마스터 상한(개별 레시피 vol은 이 아래로 합성)
 const MAX_VOICES = 8; // 동시 재생 보이스 상한(SFX만 계수, BGM 제외)
-const BGM_VOLUME = 0.06; // 앰비언트 BGM — 아주 낮게(전투 SFX를 덮지 않게)
+const BGM_VOLUME = 0.11; // 앰비언트 BGM — 낮게(전투 SFX를 덮지 않되 분위기는 들리게)
 
 let ctx = null; // AudioContext (첫 제스처에서 lazy 생성)
-let master = null; // 마스터 gain 노드
+let master = null; // 마스터 gain 노드(음소거 토글이 묶이는 한 겹)
+let sfxBus = null; // SFX 버스 gain — 모든 효과음이 여기로 모임(master 하위)
+let bgmBus = null; // BGM 버스 gain — 앰비언트 BGM out이 여기로(master 하위)
 let resumed = false; // 첫 제스처 resume 완료 여부
 let muted = false; // 음소거 상태(localStorage 동기화)
+let sfxVolume = 1.0; // SFX 버스 볼륨(0~1, localStorage 동기화). 제스처 전엔 모듈 변수만 갱신.
+let bgmVolume = 1.0; // BGM 버스 볼륨(0~1, localStorage 동기화). unlock 시 노드에 반영.
 let activeVoices = 0; // 현재 살아있는 SFX 보이스 수
 let bgm = null; // BGM 핸들({ 노드들, interval })
 let noiseBuffer = null; // 재사용 노이즈 버퍼(타격/폭발용)
@@ -79,7 +85,7 @@ function playTone({
   g.gain.setValueAtTime(0.0001, t);
   g.gain.exponentialRampToValueAtTime(vol, t + attack);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  osc.connect(g).connect(master);
+  osc.connect(g).connect(sfxBus);
   osc.start(t);
   osc.stop(t + dur + 0.02);
   trackVoice(osc, g);
@@ -106,7 +112,7 @@ function playNoise({
   const g = ctx.createGain();
   g.gain.setValueAtTime(vol, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  src.connect(filter).connect(g).connect(master);
+  src.connect(filter).connect(g).connect(sfxBus);
   src.start(t);
   src.stop(t + dur + 0.02);
   trackVoice(src, g, filter);
@@ -186,39 +192,70 @@ const RECIPES = {
   }
 };
 
-// ── BGM — 저음량 절차적 앰비언트(종말물 톤) ───────────────────────────────
-// 디튠 드론 패드(저역 saw 2 + triangle 1)에 느린 LFO로 필터를 흔들고,
-// 희소한 단조 아르페지오를 lookahead 인터벌로 얹는다. master를 거치므로 음소거에 함께 묶임.
+// ── BGM — 절차적 앰비언트(종말물 톤) ───────────────────────────────────────
+// 5겹 레이어로 황량한 폐허 분위기를 합성한다:
+//   ① 서브 베이스(41Hz sine)   — 바닥을 누르는 묵직한 진동(불안/위협)
+//   ② 디튠 드론 패드(saw×2+tri) — 두께 있는 저역 드론(코어 톤)
+//   ③ 황량한 바람(필터 노이즈)  — LFO로 천천히 흔들리는 desolate wind 베드
+//   ④ 숨 쉬는 LFO 필터          — 드론 컷오프를 흔들어 "살아 움직이는 폐허"감
+//   ⑤ 단조 모티프 + 멀리 우는 종 — 희소하게 떨어지는 A단조 음 + 가끔 낮은 종소리(공허/종말)
+// bgmBus→master를 거치므로 음소거에 함께 묶이고, bgmBus.gain으로 BGM만 따로 볼륨 조절된다.
+// 모든 노드는 bgm에 모아 추적.
 function startBgm() {
   if (bgm || !ctx || muted) return;
   try {
     const out = ctx.createGain();
     out.gain.value = BGM_VOLUME;
-    out.connect(master);
+    out.connect(bgmBus);
 
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
     lp.frequency.value = 600;
     lp.connect(out);
 
-    // 드론 패드 — 살짝 디튠해 두께를 준다.
     const droneNodes = [];
-    [
-      { f: 55, type: 'sawtooth', g: 0.5 },
-      { f: 55.5, type: 'sawtooth', g: 0.5 },
-      { f: 82.41, type: 'triangle', g: 0.28 }
-    ].forEach(({ f, type, g }) => {
+    const startOsc = (f, type, g, dest) => {
       const osc = ctx.createOscillator();
       osc.type = type;
       osc.frequency.value = f;
       const gain = ctx.createGain();
       gain.gain.value = g;
-      osc.connect(gain).connect(lp);
+      osc.connect(gain).connect(dest);
       osc.start();
       droneNodes.push(osc, gain);
-    });
+      return osc;
+    };
 
-    // 느린 LFO — 필터 컷오프를 ±220Hz로 흔들어 "숨 쉬는" 불안한 질감.
+    // ① 서브 베이스 — 깊은 41Hz(A0) sine. lp 우회해 out 직결(저역 손실 방지).
+    startOsc(41.2, 'sine', 0.45, out);
+
+    // ② 디튠 드론 패드 — 살짝 디튠해 두께를 준다.
+    startOsc(55, 'sawtooth', 0.5, lp);
+    startOsc(55.5, 'sawtooth', 0.5, lp);
+    startOsc(82.41, 'triangle', 0.28, lp);
+
+    // ③ 황량한 바람 — 화이트노이즈를 좁은 밴드패스로 통과시켜 "휘잉" 도는 바람 베드.
+    //    느린 LFO로 밴드 중심을 흔들어 정적이지 않게.
+    const wind = ctx.createBufferSource();
+    wind.buffer = getNoiseBuffer();
+    wind.loop = true;
+    const windBp = ctx.createBiquadFilter();
+    windBp.type = 'bandpass';
+    windBp.frequency.value = 480;
+    windBp.Q.value = 0.8;
+    const windGain = ctx.createGain();
+    windGain.gain.value = 0.09;
+    wind.connect(windBp).connect(windGain).connect(out);
+    wind.start();
+    const windLfo = ctx.createOscillator();
+    windLfo.type = 'sine';
+    windLfo.frequency.value = 0.05;
+    const windLfoGain = ctx.createGain();
+    windLfoGain.gain.value = 240;
+    windLfo.connect(windLfoGain).connect(windBp.frequency);
+    windLfo.start();
+
+    // ④ 느린 LFO — 드론 필터 컷오프를 ±220Hz로 흔들어 "숨 쉬는" 불안한 질감.
     const lfo = ctx.createOscillator();
     lfo.type = 'sine';
     lfo.frequency.value = 0.07;
@@ -227,24 +264,26 @@ function startBgm() {
     lfo.connect(lfoGain).connect(lp.frequency);
     lfo.start();
 
-    // 희소 단조 아르페지오 — 2.6초마다 한 음. 음소거 중엔 스킵(CPU 절약).
-    const scale = [220, 261.63, 293.66, 349.23, 392, 349.23, 293.66];
+    // ⑤ 희소 단조 모티프 — 2.8초마다 A단조 음 하나. 8스텝마다 멀리 우는 종(낮은 옥타브).
+    //    음소거/비실행 중엔 스킵(CPU 절약).
+    const scale = [220, 261.63, 293.66, 329.63, 392, 349.23, 293.66, 261.63]; // A C D E G F D C (A단조)
     let step = 0;
     const interval = setInterval(() => {
       if (!ctx || muted || ctx.state !== 'running') return;
+      const t = ctx.currentTime;
+
+      // 단조 모티프 — 부드러운 triangle, 길게 페이드.
       const f = scale[step % scale.length];
-      step++;
       const osc = ctx.createOscillator();
       osc.type = 'triangle';
       osc.frequency.value = f;
       const g = ctx.createGain();
-      const t = ctx.currentTime;
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.05, t + 0.5);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 2.3);
+      g.gain.exponentialRampToValueAtTime(0.05, t + 0.6);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 2.5);
       osc.connect(g).connect(out);
       osc.start(t);
-      osc.stop(t + 2.5);
+      osc.stop(t + 2.7);
       osc.onended = () => {
         try {
           osc.disconnect();
@@ -253,9 +292,32 @@ function startBgm() {
           /* 무시 */
         }
       };
-    }, 2600);
 
-    bgm = { out, lp, lfo, lfoGain, droneNodes, interval };
+      // 멀리 우는 종 — 8스텝(약 22초)마다 낮은 옥타브 음을 길게(공허한 종말 신호).
+      if (step % 8 === 0) {
+        const bell = ctx.createOscillator();
+        bell.type = 'sine';
+        bell.frequency.value = f / 2;
+        const bg = ctx.createGain();
+        bg.gain.setValueAtTime(0.0001, t);
+        bg.gain.exponentialRampToValueAtTime(0.07, t + 0.05);
+        bg.gain.exponentialRampToValueAtTime(0.0001, t + 4.0);
+        bell.connect(bg).connect(out);
+        bell.start(t);
+        bell.stop(t + 4.2);
+        bell.onended = () => {
+          try {
+            bell.disconnect();
+            bg.disconnect();
+          } catch {
+            /* 무시 */
+          }
+        };
+      }
+      step++;
+    }, 2800);
+
+    bgm = { out, lp, lfo, lfoGain, wind, windBp, windGain, windLfo, windLfoGain, droneNodes, interval };
   } catch {
     bgm = null; // BGM 실패해도 SFX/게임 진행 무중단
   }
@@ -267,7 +329,15 @@ function applyMasterGain() {
   if (master) master.gain.value = muted ? 0 : MASTER_VOLUME;
 }
 
-// 첫 사용자 제스처 — ctx 생성 + resume + BGM 시작. 1회만 동작.
+// 버스 게인 반영 — 노드가 살아있을 때만(제스처 전 호출은 모듈 변수만 갱신되고 unlock에서 반영).
+function applySfxGain() {
+  if (sfxBus) sfxBus.gain.value = sfxVolume;
+}
+function applyBgmGain() {
+  if (bgmBus) bgmBus.gain.value = bgmVolume;
+}
+
+// 첫 사용자 제스처 — ctx 생성 + master/버스 구성 + resume + BGM 시작. 1회만 동작.
 function unlock() {
   try {
     if (!ctx) {
@@ -277,6 +347,13 @@ function unlock() {
       master = ctx.createGain();
       applyMasterGain();
       master.connect(ctx.destination);
+      // master 하위에 SFX/BGM 두 버스 신설 — 개별 볼륨은 버스 게인으로, 음소거는 master로 묶임.
+      sfxBus = ctx.createGain();
+      bgmBus = ctx.createGain();
+      applySfxGain(); // 복원된 sfxVolume을 노드에 반영
+      applyBgmGain(); // 복원된 bgmVolume을 노드에 반영
+      sfxBus.connect(master);
+      bgmBus.connect(master);
     }
     if (ctx.state === 'suspended') ctx.resume();
     resumed = true;
@@ -351,16 +428,78 @@ function onMuteChange(fn) {
   return () => muteListeners.delete(fn);
 }
 
-// 모듈 로드 시 초기화 — localStorage에서 음소거 상태 복원 + 제스처 언락 설치.
+// ── 버스 볼륨 (SFX / BGM 독립 제어) ───────────────────────────────────────
+// 음소거(master)와 별개로 각 버스의 게인을 0~1로 조절. ctx/버스가 없어도(제스처 전)
+// 모듈 변수만 갱신하고 노드 반영은 unlock 시점으로 미룬다(guard). 저장은 즉시.
+const clamp01 = (v) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
+
+function persist(key, value) {
+  if (!isBrowser) return;
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    /* 저장 실패 무시 — 볼륨은 세션 내에서 계속 동작 */
+  }
+}
+
+function setSfxVolume(v) {
+  sfxVolume = clamp01(v);
+  persist(SFXVOL_KEY, sfxVolume);
+  applySfxGain();
+  return sfxVolume;
+}
+function setBgmVolume(v) {
+  bgmVolume = clamp01(v);
+  persist(BGMVOL_KEY, bgmVolume);
+  applyBgmGain();
+  return bgmVolume;
+}
+const getSfxVolume = () => sfxVolume;
+const getBgmVolume = () => bgmVolume;
+
+// 모듈 로드 시 초기화 — localStorage에서 음소거 상태 + 버스 볼륨 복원 + 제스처 언락 설치.
+// 볼륨은 노드가 아직 없으니 모듈 변수만 채우고, 실제 게인 반영은 unlock()이 맡는다.
 if (isBrowser) {
   try {
     muted = localStorage.getItem(STORAGE_KEY) === '1';
   } catch {
     muted = false;
   }
+  // 저장값이 유효 숫자면 복원, 아니면 기본 1.0 유지.
+  const restoreVol = (key, fallback) => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return fallback;
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? clamp01(n) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  sfxVolume = restoreVol(SFXVOL_KEY, sfxVolume);
+  bgmVolume = restoreVol(BGMVOL_KEY, bgmVolume);
   installUnlock();
 }
 
-const SFX = { play, toggleMute, isMuted, onMuteChange, init: installUnlock };
+const SFX = {
+  play,
+  toggleMute,
+  isMuted,
+  onMuteChange,
+  setSfxVolume,
+  setBgmVolume,
+  getSfxVolume,
+  getBgmVolume,
+  init: installUnlock
+};
 export default SFX;
-export { play, toggleMute, isMuted, onMuteChange };
+export {
+  play,
+  toggleMute,
+  isMuted,
+  onMuteChange,
+  setSfxVolume,
+  setBgmVolume,
+  getSfxVolume,
+  getBgmVolume
+};

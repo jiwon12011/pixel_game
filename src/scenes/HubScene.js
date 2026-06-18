@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import TabBar from '../objects/TabBar.js';
 import { TEX, WEAPON_MANIFEST } from '../assets/manifest.js';
-import { BORDER_H, HUB_H, HUB_VIEW, LOGICAL } from '../constants/layout.js';
+import { BORDER_H, HUB_H, HUB_VIEW, LOGICAL, RENDER_SCALE } from '../constants/layout.js';
 import { PALETTE } from '../constants/palette.js';
 import { PIXEL_FONT, BODY_FONT, installCrispText } from '../constants/fonts.js';
 import GameState from '../state/GameState.js';
@@ -20,6 +20,7 @@ import {
 import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 import { PERMANENT_UPGRADES, PERMANENT_ORDER } from '../constants/meta.js';
 import SFX from '../audio/sfx.js';
+import { prefersReducedMotion } from '../utils/motion.js';
 
 // 합성 허브 (하단 42%): 트럭 작업대 톤의 어두운 철판 패널 + 4탭 바.
 // 능력치/합성 탭은 실제 동작(GameState 연동), 스킬/인벤은 "준비 중" 스텁.
@@ -43,6 +44,7 @@ const C = {
   orange: '#ff6020',
   toxic: '#20ff9a',
   gray: '#9a8b78',
+  body: '#cbb89a', // 본문/능력 설명 — 어두운 배경 위 밝은 베이지(가독)
   stub: '#7a6a50',
   btnDark: '#6a5a50',
   ink: '#1a1008'
@@ -55,8 +57,35 @@ const ATTR_COLOR = {
   TOXIC: C.toxic,
   SHOCK: '#66ddff',
   PIERCE: '#66ddff',
-  PHYSICAL: C.gray
+  PHYSICAL: C.body // 어두운 회색은 작은 한글 가독 floor 아래 → 밝은 베이지
 };
+
+// 그래픽 별점 — 5칸 픽셀 별로 강화 레벨(0~10)을 표시. 한 칸 = 2레벨(꽉/반/빈).
+// 무기 상세 팝업 전용(행 리스트에서는 제거됨). g는 호출부가 비우지 않아도 매번 clear→재드로.
+//   x,y: 좌상단(8px 별 기준) / level: 0~ENHANCE_MAX_LEVEL.
+function drawStars(g, x, y, level) {
+  g.clear();
+  const full = Math.floor(level / 2);
+  const half = level % 2;
+  // 8px 셀 안 마름모(diamond) — 위/오/아/왼 4개 2px 도트로 픽셀 다이아 형태.
+  // 채움은 4도트 전부, 반 별은 위/왼 2도트만(왼쪽 절반 인상).
+  const diamond = (cx, cy, color, halfOnly) => {
+    g.fillStyle(color);
+    g.fillRect(cx - 1, cy - 3, 2, 2); // 위
+    g.fillRect(cx - 4, cy - 1, 2, 2); // 왼
+    if (!halfOnly) {
+      g.fillRect(cx + 2, cy - 1, 2, 2); // 오
+      g.fillRect(cx - 1, cy + 1, 2, 2); // 아래
+    }
+  };
+  for (let i = 0; i < 5; i++) {
+    const cx = x + i * 12 + 4; // 8px 셀 중심
+    const cy = y + 4;
+    diamond(cx, cy, 0x4a3d2a, false); // 빈 별 배경(어두운 마름모)
+    if (i < full) diamond(cx, cy, 0xf0c040, false); // 꽉 찬 별
+    else if (i === full && half) diamond(cx, cy, 0xf0c040, true); // 반 별
+  }
+}
 
 export default class HubScene extends Phaser.Scene {
   constructor() {
@@ -65,11 +94,20 @@ export default class HubScene extends Phaser.Scene {
 
   create() {
     installCrispText(this); // 모든 텍스트 2배 해상도 + 정수좌표(한글 선명화)
+    // 뷰포트는 백버퍼(720) 픽셀 기준 — HUB_VIEW는 RENDER_SCALE 반영(0,742,720,538).
+    // setZoom+origin(0,0)으로 360×269 허브 월드를 이 뷰포트에 1:1로 채운다(입력은 getWorldPoint가 역변환).
     this.cameras.main.setViewport(HUB_VIEW.x, HUB_VIEW.y, HUB_VIEW.width, HUB_VIEW.height);
+    this.cameras.main.setZoom(RENDER_SCALE).setOrigin(0, 0);
 
     this.weaponsLoaded = false;
     this.refreshActive = null;
     this.activeTab = null;
+    // prefers-reduced-motion(OS) + 사용자 토글 합산 — 모달 등장 연출 on/off 기준.
+    this.motionOk = !prefersReducedMotion();
+    // 무기 상세 모달 싱글톤 — 씬 재시작 시 파기된 컨테이너 참조를 붙들지 않게 초기화.
+    this.weaponModal = null;
+    this._modalWidgets = null;
+    this._modalWeaponId = null;
 
     this.drawPanel();
     this.drawBorderStrip();
@@ -170,6 +208,7 @@ export default class HubScene extends Phaser.Scene {
   // ── 탭 디스패치 ──────────────────────────────────────────────────────
   showTab(tab) {
     this.activeTab = tab.key;
+    this.closeWeaponModal(); // 탭 전환 시 무기 상세 팝업 닫기(합성 탭 밖에서 잔존 방지)
     this.teardownScroll(); // 스크롤 입력/마스크 정리(합성·영구 강화 탭 전환·재진입 시)
     this.contentLayer.removeAll(true); // 이전 탭 GameObject 파기
     this.refreshActive = null;
@@ -197,7 +236,7 @@ export default class HubScene extends Phaser.Scene {
     // 버튼 라벨은 한글(제작/강화/장착/장착 중/재료 부족/선행 필요 등)이 섞여 BODY_FONT 11px로.
     // (↑비용·MAX 같은 숫자/영문도 BODY로 무난, 자소 뭉갬 없이 일관)
     const label = this.add
-      .text(x, y, '', { fontFamily: BODY_FONT, fontSize: '11px', color: C.ink })
+      .text(x, y, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.ink })
       .setOrigin(0.5);
     bg.setInteractive({ useHandCursor: true }).on('pointerdown', () => {
       if (!bg.visible) return; // 숨겨진 버튼(보유/미보유 토글)이 클릭을 가로채지 않게
@@ -229,7 +268,7 @@ export default class HubScene extends Phaser.Scene {
     this.layer(
       this.add.text(CONTENT.x + 4, CONTENT.y + 6, '능력치', {
         fontFamily: PIXEL_FONT, // 섹션 타이틀은 픽셀 톤 유지 — 크기 ↑ + resolution으로 선명
-        fontSize: '15px',
+        fontSize: '17px',
         color: C.gold
       })
     );
@@ -245,7 +284,7 @@ export default class HubScene extends Phaser.Scene {
     this.coinBalTxt = this.add
       .text(CONTENT.x + CONTENT.w - 46, CONTENT.y + 13, '0', {
         fontFamily: PIXEL_FONT,
-        fontSize: '12px',
+        fontSize: '13px',
         color: C.gold
       })
       .setOrigin(0, 0.5);
@@ -267,7 +306,7 @@ export default class HubScene extends Phaser.Scene {
       const labelTxt = this.add
         .text(CONTENT.x + 24, cy, def.label, {
           fontFamily: BODY_FONT, // 한글 스탯 이름 — 픽셀 11px 자소 뭉갬, BODY로
-          fontSize: '11px',
+          fontSize: '13px',
           color: C.gold
         })
         .setOrigin(0, 0.5);
@@ -276,10 +315,10 @@ export default class HubScene extends Phaser.Scene {
 
       // 현재값(주황) + 증가량(청록)
       const valueTxt = this.add
-        .text(CONTENT.x + 96, cy, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.orange })
+        .text(CONTENT.x + 96, cy, '', { fontFamily: PIXEL_FONT, fontSize: '13px', color: C.orange })
         .setOrigin(0, 0.5);
       const incrTxt = this.add
-        .text(CONTENT.x + 152, cy, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.toxic })
+        .text(CONTENT.x + 152, cy, '', { fontFamily: PIXEL_FONT, fontSize: '13px', color: C.toxic })
         .setOrigin(0, 0.5);
       valueTxt.setShadow(1, 1, '#000000', 0, false, true);
       incrTxt.setShadow(1, 1, '#000000', 0, false, true);
@@ -338,7 +377,7 @@ export default class HubScene extends Phaser.Scene {
         this.add
           .text(CONTENT.x + CONTENT.w / 2, CONTENT.y + CONTENT.h / 2, '무기 도면 불러오는 중…', {
             fontFamily: BODY_FONT, // 한글 안내문 — 픽셀폰트 자소 뭉갬, BODY로
-            fontSize: '11px',
+            fontSize: '13px',
             color: C.gray
           })
           .setOrigin(0.5)
@@ -349,25 +388,35 @@ export default class HubScene extends Phaser.Scene {
     // 헤더(축소 26px·고정): 현재 장착 무기. 아래 스크롤 리스트와 분리해 항상 보이게 둔다.
     this.equipIcon = this.add.image(CONTENT.x + 20, CONTENT.y + 14, 'pipe_wrench').setScale(0.16);
     this.equipName = this.add
-      .text(CONTENT.x + 38, CONTENT.y + 8, '', { fontFamily: BODY_FONT, fontSize: '11px', color: C.gold })
+      .text(CONTENT.x + 38, CONTENT.y + 8, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.gold })
       .setOrigin(0, 0.5);
     this.equipAbility = this.add
-      .text(CONTENT.x + 38, CONTENT.y + 20, '', { fontFamily: BODY_FONT, fontSize: '11px', color: C.gray })
+      .text(CONTENT.x + 38, CONTENT.y + 20, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.gray })
       .setOrigin(0, 0.5);
     this.equipAbility.setShadow(1, 1, '#000000', 0, false, true);
     this.layer(this.equipIcon, this.equipName, this.equipAbility);
 
-    // 무기 강화 Lv은 런 스코프(사망 시 리셋) — Lv.N이 다음 런에 0이 되는 걸 버그로 오인하지 않게
-    // 헤더 우상단에 작게 고지. 정적 라벨이라 refreshCraft 갱신 대상 아님.
-    const runLimit = this.add
-      .text(CONTENT.x + CONTENT.w - 8, CONTENT.y + 10, '강화 · 이 무기만 · 런 한정', {
-        fontFamily: BODY_FONT,
-        fontSize: '11px', // 한글 주석 — 9px는 뭉갬, 우측 정렬이라 좌측 헤더와 안 겹침
-        color: C.stub
-      })
-      .setOrigin(1, 0.5);
-    runLimit.setShadow(1, 1, '#000000', 0, false, true);
-    this.layer(runLimit);
+    // 헤더 우측 "탭하면 상세" 힌트 chevron — 헤더가 눌리는 영역임을 알림.
+    this.layer(
+      this.add
+        .text(CONTENT.x + CONTENT.w - 8, CONTENT.y + 14, '›', {
+          fontFamily: BODY_FONT,
+          fontSize: '17px',
+          color: C.stub
+        })
+        .setOrigin(1, 0.5)
+    );
+
+    // 헤더 전체를 누르면 장착중 무기 상세 팝업 — 리스트 스크롤 없이 바로 보기/강화.
+    // 투명 히트영역을 요소 위에 얹어 입력만 받는다(리스트 영역 위쪽이라 스크롤과 안 겹침).
+    const headerHit = this.add
+      .rectangle(CONTENT.x, CONTENT.y, CONTENT.w, 28, 0xffffff, 0.001)
+      .setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true });
+    headerHit.on('pointerdown', () => {
+      if (GameState.equippedWeapon) this.openWeaponModal(GameState.equippedWeapon);
+    });
+    this.layer(headerHit);
 
     // 헤더 구분선
     this.layer(
@@ -402,6 +451,8 @@ export default class HubScene extends Phaser.Scene {
     this.refreshCraft();
   }
 
+  // 슬림 무기 행 — 셀배경/아이콘/이름/그래픽 별점만. 능력·재료칩·스탯·버튼은 상세 팝업으로 이관.
+  // 행 전체(cellBg)를 누르면 openWeaponModal로 진입. 스크롤 드래그 중 오발은 cellBg 핸들러에서 가드.
   buildWeaponRow(id, top, rowH, list) {
     const recipe = WEAPON_RECIPES[id];
     const cy = top + rowH / 2; // rowH 48 → cy = top + 24
@@ -411,7 +462,21 @@ export default class HubScene extends Phaser.Scene {
     const cellBg = this.add
       .rectangle(CONTENT.x, cy - rowH / 2, CONTENT.w, rowH, 0x1a1008, 0.15)
       .setOrigin(0, 0);
+    // 행 전체를 탭하면 상세 팝업 — pointerdown으로 받아야 닫기 버튼(pointerdown)이 모달을 닫은 뒤
+    // 같은 탭의 pointerup이 cellBg에 도달해 모달이 즉시 재오픈되는 버그를 피한다.
+    // 드래그(스크롤)로 끌었으면 오발 진입 방지.
+    cellBg.setInteractive({ useHandCursor: true }).on('pointerdown', () => {
+      if (this.scroll?.drag?.moved) return;
+      this.openWeaponModal(id);
+    });
     list.add(cellBg);
+
+    // 좌측 accent 바 — 장착중인 행만 노출(refreshCraft가 alpha 토글). 행 전체 높이.
+    const accentBar = this.add
+      .rectangle(CONTENT.x, top, 3, rowH, 0xf0c040, 0)
+      .setOrigin(0, 0);
+    list.add(accentBar);
+
     // 행 하단 1px 구분선(칸 경계) — 셀 배경과 함께 뒤쪽 z, 스크롤 동행.
     list.add(
       this.add.rectangle(CONTENT.x, cy + rowH / 2, CONTENT.w, 1, 0x000000, 0.4).setOrigin(0, 0.5)
@@ -425,170 +490,43 @@ export default class HubScene extends Phaser.Scene {
     }
     list.add(icon);
 
-    // 이름(cy-13) + 능력(cy+1) — 능력은 속성색으로 FIRE 주황·TOXIC 청록 표식.
-    // 한글 이름·설명은 BODY_FONT(픽셀폰트는 8~10px 한글 자소가 뭉개짐). 제목 톤(금)은 유지.
+    // 이름 — 행 상단(cy-10). 한글은 BODY_FONT(픽셀폰트 한글 자소 뭉갬), 제목 톤(금).
     const nameTxt = this.add
-      .text(CONTENT.x + 56, cy - 13, recipe.name, {
+      .text(CONTENT.x + 52, cy - 10, recipe.name, {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: C.gold
       })
       .setOrigin(0, 0.5);
     nameTxt.setShadow(1, 1, '#000000', 0, false, true);
     list.add(nameTxt);
 
-    // 강화 레벨 표식 — "Lv.N"(보유 & Lv>0일 때만 refreshCraft가 표시). 청록으로 또렷이.
-    // 좌표 고정: 한글 이름폭(BODY 렌더 변동)에 따라 흔들리지 않게 이름영역 우측 고정 x(+150)로 둔다.
-    // (최장 무기명 7자 ≈ 80px < 94px 예약 → 이름과 겹치지 않고, 버튼(좌측 ~x+245)과도 안 닿음)
-    const levelTxt = this.add
-      .text(CONTENT.x + 150, cy - 13, '', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '10px',
-        color: C.toxic
-      })
-      .setOrigin(0, 0.5)
-      .setVisible(false);
-    levelTxt.setShadow(1, 1, '#000000', 0, false, true);
-    list.add(levelTxt);
-
-    // 능력 설명 — cy+1로 올려 아래 재료칩(cy+16)과 간격 확보(기존 cy+4는 칩과 겹침 빠듯).
-    // lineSpacing 3 + wordWrap(버튼 직전까지)로 긴 설명이 버튼 영역으로 흘러넘치지 않게.
-    const ability = this.add
-      .text(CONTENT.x + 56, cy + 1, recipe.ability, {
+    // 능력 설명 1줄 — 이름 아래(cy+7). 속성색(FIRE 주황·TOXIC 청록). 작은 회색이 뭉개져
+    // 이름과 같은 13px + 밝은 색으로(11px·어두운 회색은 한글 가독 floor 아래).
+    const abilityTxt = this.add
+      .text(CONTENT.x + 52, cy + 7, recipe.ability, {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
-        color: ATTR_COLOR[recipe.attrTag] || C.gray,
-        lineSpacing: 3,
-        wordWrap: { width: 190 }
+        fontSize: '13px',
+        color: ATTR_COLOR[recipe.attrTag] || C.body
       })
       .setOrigin(0, 0.5);
-    ability.setShadow(1, 1, '#000000', 0, false, true);
-    list.add(ability);
+    list.add(abilityTxt);
 
-    // 재료 아이콘(16px) + 보유/필요 수량(8px). 미보유=제작 비용, 보유=강화 비용으로 재활용(refreshCraft).
-    //   충분(보유≥필요) 청록 / 부족 주황 — 색칩 대신 실제 재료 아이콘으로 한눈에 식별.
-    //   칩 키는 제작 비용 키 우선, 비용이 빈 무기(pipe_wrench)는 강화 폴백 재료(ENHANCE_BASE_COST)로.
-    const chips = [];
-    const costKeys = Object.keys(recipe.cost || {});
-    const chipKeys = costKeys.length > 0 ? costKeys : Object.keys(ENHANCE_BASE_COST[id] || {});
-    chipKeys.forEach((matKey, k) => {
-      const need = recipe.cost?.[matKey] || 0;
-      const px = CONTENT.x + 56 + k * 48; // 이름/능력과 좌측 정렬, 간격 48 유지
-      const py = cy + 16; // rowH 48 — 능력(cy+4) 아래 줄에 재료칩 배치
-      const meta = MATERIAL_META[matKey];
-      let icon;
-      if (meta && this.textures.exists(meta.iconKey)) {
-        const src = this.textures.get(meta.iconKey).getSourceImage();
-        icon = this.add.image(px, py, meta.iconKey).setOrigin(0.5).setScale(16 / src.height);
-      } else {
-        icon = this.add
-          .rectangle(px, py, 12, 12, GRADE_COLOR[meta?.grade] || 0x8a6a3a)
-          .setOrigin(0.5)
-          .setStrokeStyle(1, 0x000000, 0.5);
-      }
-      const txt = this.add
-        .text(px + 11, py, `0/${need}`, {
-          fontFamily: BODY_FONT,
-          fontSize: '11px', // 보유/필요 수량 — 10→11px로 가독성 상향(그림자 + resolution)
-          color: C.gray
-        })
-        .setOrigin(0, 0.5);
-      txt.setShadow(1, 1, '#000000', 0, false, true);
-      list.add([icon, txt]);
-      chips.push({ matKey, need, icon, txt });
-    });
+    // (행 별점 제거 — 강화 단계는 우측 상태 라벨 ★N + 상세 팝업 별점으로 표시.)
 
-    // ATK · DPS — "뭐가 센지" 한눈에. 이름 줄(cy-13) 우측: 보유 행은 버튼이 22px(이 줄 위)이라,
-    //   미보유 행은 버튼(craftBtn)이 좌측 x268부터라 충돌 없음. x는 refreshCraft가 별 표식 유무로 보정.
-    //   미보유=Lv0 base, 보유=현재 레벨. 강화 가능하면 "DPS 60→89"로 다음 레벨 미리보기(refreshCraft).
-    const statTxt = this.add
-      .text(CONTENT.x + 150, cy - 13, '', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '9px',
-        color: C.gold
-      })
-      .setOrigin(0, 0.5);
-    statTxt.setShadow(1, 1, '#000000', 0, false, true);
-    list.add(statTxt);
-
-    // MAX 강화 라벨 — 보유 & Lv5일 때 재료칩 자리에 표시(칩은 숨김). refreshCraft가 토글.
-    const maxLabel = this.add
-      .text(CONTENT.x + 56, cy + 16, '최대 강화', {
+    // 우측 상태 라벨 — 장착중/보유(★N)/미보유(잠금). refreshCraft가 텍스트·색 갱신.
+    const stateLbl = this.add
+      .text(CONTENT.x + CONTENT.w - 6, cy, '', {
         fontFamily: BODY_FONT,
         fontSize: '11px',
-        color: C.gold
+        color: C.stub
       })
-      .setOrigin(0, 0.5)
-      .setVisible(false);
-    maxLabel.setShadow(1, 1, '#000000', 0, false, true);
-    list.add(maxLabel);
+      .setOrigin(1, 0.5);
+    stateLbl.setShadow(1, 1, '#000000', 0, false, true);
+    list.add(stateLbl);
 
-    // 액션 버튼 — 미보유: 제작(craftBtn 68×28). 보유: 장착(equipBtn) + 강화(enhBtn) 42×22 2개.
-    // 보유/미보유는 동시 노출 안 됨(refreshCraft가 setVisible 토글) → 위치 겹쳐도 무방.
-    const craftBtn = this.makeButton(
-      CONTENT.x + CONTENT.w - 46,
-      cy,
-      68,
-      28,
-      () => {
-        if (recipe.requires && !GameState.ownedWeapons.has(recipe.requires)) return;
-        if (GameState.craftWeapon(id, recipe.cost)) {
-          GameState.equipWeapon(id); // 제작 후 자동 장착
-          SFX.play('craft'); // 제작 성공 상승음
-        }
-      },
-      list
-    );
-    const equipBtn = this.makeButton(
-      CONTENT.x + CONTENT.w - 70,
-      cy,
-      42,
-      22,
-      () => {
-        if (GameState.equipWeapon(id)) SFX.play('tab'); // 장착 클릭 blip
-      },
-      list
-    );
-    const enhBtn = this.makeButton(
-      CONTENT.x + CONTENT.w - 24,
-      cy,
-      42,
-      22,
-      () => {
-        if (GameState.enhanceWeapon(id)) SFX.play('enhance'); // 'change' → refreshCraft 갱신
-      },
-      list
-    );
-
-    // R8 codex_preview — 해금 시 "지금 재료로 바로 제작 가능한 미보유 무기"에 켜지는 힌트 표식.
-    // 해금 전엔 항상 숨김(차이가 보이게). 버튼 위 우상단에 작게 띄운다(스크롤 함께 이동).
-    const hintTxt = this.add
-      // 한글 '제작가능' — 픽셀 7px는 자소가 뭉개져 BODY로. 버튼 위 좁은 자리라 9px로 절제(우측 정렬).
-      .text(CONTENT.x + CONTENT.w - 74, cy - 9, '★ 제작가능', {
-        fontFamily: BODY_FONT,
-        fontSize: '9px',
-        color: C.toxic
-      })
-      .setOrigin(1, 0.5)
-      .setVisible(false);
-    hintTxt.setShadow(1, 1, '#000000', 0, false, true);
-    list.add(hintTxt);
-
-    return {
-      id,
-      recipe,
-      chips,
-      craftBtn,
-      equipBtn,
-      enhBtn,
-      btnBgs: [craftBtn.bg, equipBtn.bg, enhBtn.bg], // 스크롤 컬링용(여러 버튼)
-      hintTxt,
-      cellBg,
-      levelTxt,
-      statTxt,
-      maxLabel,
-      cy
-    };
+    // btnBgs 빈 배열 — 행에서 버튼을 팝업으로 옮겨 스크롤 컬링 대상이 없다(setScroll 무해 통과).
+    return { id, recipe, cellBg, accentBar, abilityTxt, stateLbl, btnBgs: [], cy };
   }
 
   // ── 공용 세로 스크롤 (합성·영구 강화 탭 공유) ─────────────────────────
@@ -639,6 +577,7 @@ export default class HubScene extends Phaser.Scene {
   setupScrollInput() {
     const inRegion = (pointer) => {
       if (!this.scroll) return false;
+      if (this._modalWeaponId) return false; // 상세 팝업이 떠 있으면 뒤 리스트 스크롤 잠금
       const p = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const s = this.scroll;
       return p.x >= CONTENT.x && p.x <= CONTENT.x + CONTENT.w && p.y >= s.listTop && p.y <= s.listBottom;
@@ -691,13 +630,15 @@ export default class HubScene extends Phaser.Scene {
       s.thumb.y = s.thumbTop + t * s.thumbTravel;
     }
 
-    // 뷰 밖(헤더 아래로 가려진) 행의 버튼은 입력 차단 — 클릭 누수 방지.
-    // 행에 버튼이 여럿이면(무기행: 제작/장착/강화) btnBgs로, 단일이면 btnBg로 컬링.
-    // 숨겨진 버튼(보유/미보유 토글)은 뷰 안이라도 입력 비활성(가려진 버튼 오발 방지).
+    // 뷰 밖(헤더 아래/탭바 위로 가려진) 행의 입력은 차단 — 클릭 누수 방지.
+    // ★중요: 마스크는 렌더링만 클리핑하고 입력 히트영역은 그대로라, 뷰 밖 행이 탭바·헤더 위에서
+    //   탭을 가로챈다. 무기행은 cellBg(행 전체)가 클릭 타깃이므로 cellBg도 반드시 컬링한다.
+    // 행에 버튼이 여럿이면(영구탭) btnBgs로, 단일이면 btnBg로 컬링.
     const half = s.rowH / 2;
     s.rows.forEach((r) => {
       const screenY = r.cy + s.y;
       const visible = screenY >= s.listTop - half && screenY <= s.listBottom + half;
+      if (r.cellBg && r.cellBg.input) r.cellBg.input.enabled = visible;
       const bgs = r.btnBgs || (r.btnBg ? [r.btnBg] : []);
       for (const bg of bgs) if (bg && bg.input) bg.input.enabled = visible && bg.visible;
     });
@@ -726,102 +667,269 @@ export default class HubScene extends Phaser.Scene {
     this.equipName.setText(eq.name);
     this.equipAbility.setText(`장착 중 · ${eq.ability}`);
 
-    // R8 codex_preview 해금 여부 — 미보유·제작가능 무기에 힌트 표식을 켤지 결정.
-    const codexPreview = !!GameState.meta.permanentUpgrades.codex_preview;
+    // 슬림 행 — 셀 배경 톤 + accent 바 + 상태 라벨. 상세(스탯/재료/버튼/별점)는 팝업이 담당.
+    this.weaponRows.forEach(({ id, recipe, cellBg, accentBar, stateLbl }) => {
+      const owned = GameState.ownedWeapons.has(id);
+      const equipped = GameState.equippedWeapon === id;
+      const level = GameState.weaponLevels[id] || 0;
 
-    // 슬롯들
-    const playerAtk = GameState.stats.atk; // DPS 표시에 쓸 플레이어 기본 공격력(단일 출처)
-
-    this.weaponRows.forEach(
-      ({ id, recipe, chips, craftBtn, equipBtn, enhBtn, hintTxt, cellBg, levelTxt, statTxt, maxLabel }) => {
-        const owned = GameState.ownedWeapons.has(id);
-        const equipped = GameState.equippedWeapon === id;
+      // 미보유 무기의 "지금 제작 가능" 판정 — 선행 무기 보유 + 재료 충분(first_forge 할인 반영).
+      let craftable = false;
+      if (!owned) {
         const prereqOk = !recipe.requires || GameState.ownedWeapons.has(recipe.requires);
-        const level = GameState.weaponLevels[id] || 0;
-        const atMax = level >= ENHANCE_MAX_LEVEL;
+        const base =
+          Object.keys(recipe.cost || {}).length > 0 ? recipe.cost : ENHANCE_BASE_COST[id] || {};
+        craftable = prereqOk && GameState.canAfford(GameState.effectiveCraftCost(base));
+      }
 
-        // 셀 배경 톤 — 장착중(골드 강조)/보유/미보유 단계별. 상태 차이가 또렷하게(영구 탭과 동일 스케일).
-        if (equipped) cellBg.setFillStyle(0xf0c040, 0.17);
-        else if (owned) cellBg.setFillStyle(0x1a1008, 0.25);
-        else cellBg.setFillStyle(0x1a1008, 0.15);
+      // 셀 배경 톤 + 좌측 accent 바 — 장착중(금)/제작가능(청록 강조)/보유/미보유.
+      if (equipped) {
+        cellBg.setFillStyle(0xf0c040, 0.35);
+        accentBar.setAlpha(0.9);
+      } else if (craftable) {
+        cellBg.setFillStyle(0x1a1008, 0.22);
+        accentBar.setFillStyle(0x20ff9a).setAlpha(0.9); // 제작 가능 — 청록 accent로 눈에 띄게
+      } else if (owned) {
+        cellBg.setFillStyle(0x1a1008, 0.32);
+        accentBar.setFillStyle(0xf0c040).setAlpha(0);
+      } else {
+        cellBg.setFillStyle(0x1a1008, 0.22);
+        accentBar.setFillStyle(0xf0c040).setAlpha(0);
+      }
 
-        // 레벨 표식 — 보유 & Lv>0일 때 진척을 별로 시각화(★채움/☆빈칸, 픽셀 톤).
-        levelTxt.setVisible(owned && level > 0);
-        if (owned && level > 0) {
-          levelTxt.setText('★'.repeat(level) + '☆'.repeat(ENHANCE_MAX_LEVEL - level));
-        }
+      // 우측 상태 라벨 — 장착중 / 보유(★N) / 제작가능 / 잠금.
+      if (equipped) stateLbl.setText('장착 중').setColor(C.gold);
+      else if (owned) stateLbl.setText(level > 0 ? `★${level}` : '보유').setColor(C.toxic);
+      else if (craftable) stateLbl.setText('제작가능').setColor(C.toxic);
+      else stateLbl.setText('잠금').setColor(C.stub);
+    });
 
-        // ATK · DPS — 미보유=Lv0 base, 보유=현재 레벨. 보유·미MAX면 다음 레벨 DPS를 "→N"으로 미리보기.
-        //   별 표식(레벨>0)이 보일 땐 그 우측(+50)으로 밀어 겹침 방지. 미보유는 craftBtn(x268)과 안 닿음.
-        const shownLevel = owned ? level : 0;
-        const atk = (recipe.atkBonus || 0) + shownLevel * ENHANCE_ATK_PER_LEVEL;
-        const dps = getWeaponDPS(id, shownLevel, playerAtk);
-        if (owned && !atMax) {
-          const nextDps = getWeaponDPS(id, level + 1, playerAtk);
-          statTxt.setText(`ATK ${atk} · DPS ${dps}→${nextDps}`);
-        } else {
-          statTxt.setText(`ATK ${atk} · DPS ${dps}`);
-        }
-        statTxt.setX(owned && level > 0 ? CONTENT.x + 200 : CONTENT.x + 150);
+    // 모달이 열려 있으면 함께 갱신(강화/장착 후 즉시 반영).
+    if (this._modalWeaponId) this.refreshWeaponModal(this._modalWeaponId);
+  }
 
-        // 버튼 가시성 — 보유: 장착+강화 / 미보유: 제작.
-        craftBtn.setVisible(!owned);
-        equipBtn.setVisible(owned);
-        enhBtn.setVisible(owned);
+  // ── 무기 상세 팝업 (합성 탭 전용, 1회 생성·재사용) ──────────────────────
+  // 슬림 행을 탭하면 열린다. 능력 설명·현재/다음 스탯·재료칩·강화/장착 버튼을 담는다.
+  // contentLayer 밖 별도 depth(50)에 두어 탭 재구성(removeAll)에 파기되지 않게 한다.
+  // 좌표는 HubScene 카메라 로컬(뷰 0,0~360,269) 기준 — 캔버스 y오프셋(371)은 카메라가 처리.
+  ensureWeaponModal() {
+    if (this.weaponModal) return;
 
-        if (owned) {
-          // 강화 비용(다음 레벨)으로 칩 재활용. MAX면 칩 숨기고 "최대 강화" 라벨.
-          // first_forge 할인은 제작 비용에만 적용 — 강화 비용엔 무관(enhanceCost 단일 출처).
-          const ecost = atMax ? {} : enhanceCost(id, level + 1);
-          maxLabel.setVisible(atMax);
-          hintTxt.setVisible(false);
-          chips.forEach(({ matKey, icon, txt }) => {
-            const needNow = ecost[matKey] || 0;
-            if (atMax || needNow <= 0) {
-              icon.setVisible(false);
-              txt.setVisible(false);
-              return;
-            }
-            icon.setVisible(true);
-            txt.setVisible(true);
-            const have = GameState.materials[matKey] || 0;
-            txt.setText(`${have}/${needNow}`);
-            txt.setColor(have >= needNow ? C.toxic : C.orange);
-          });
+    const PW = 320; // 패널 폭
+    const PX = 20; // 패널 좌상단 x (뷰 기준)
+    const PY = 10; // 패널 좌상단 y
+    const m = this.add.container(0, 0).setDepth(50).setVisible(false);
+    this.weaponModal = m;
+    const mw = {}; // 갱신 대상 핸들 모음
 
-          // 장착 버튼 — 장착중이면 비활성 표기.
-          if (equipped) equipBtn.set(false, '장착 중', FILL.disabled, C.gold);
-          else equipBtn.set(true, '장착', FILL.active, C.ink);
+    // 스크림 — 전체 뷰 덮고 클릭 시 닫기.
+    const scrim = this.add
+      .rectangle(0, 0, LOGICAL.width, HUB_H, 0x000000, 0.75)
+      .setOrigin(0, 0)
+      .setInteractive();
+    scrim.on('pointerup', () => this.closeWeaponModal());
+    m.add(scrim);
 
-          // 강화 버튼 — MAX 비활성 / 재료부족 비활성 / afford 활성.
-          if (atMax) enhBtn.set(false, 'MAX', FILL.disabled, C.gold);
-          else if (!GameState.canAfford(ecost)) enhBtn.set(false, '강화', FILL.disabled, C.btnDark);
-          else enhBtn.set(true, '강화', FILL.active, C.ink);
-        } else {
-          // 미보유 — 제작 비용 표시(R10 first_forge 첫 합성 할인 반영, craftWeapon 차감과 동일 출처).
-          maxLabel.setVisible(false);
-          const eff = GameState.effectiveCraftCost(recipe.cost);
-          hintTxt.setVisible(codexPreview && prereqOk && GameState.canAfford(eff));
-          chips.forEach(({ matKey, need, icon, txt }) => {
-            const needNow = eff[matKey] ?? need; // 할인 적용 시 줄어든 필요 수량
-            if (needNow <= 0) {
-              icon.setVisible(false);
-              txt.setVisible(false);
-              return;
-            }
-            icon.setVisible(true);
-            txt.setVisible(true);
-            const have = GameState.materials[matKey] || 0;
-            txt.setText(`${have}/${needNow}`);
-            txt.setColor(have >= needNow ? C.toxic : C.orange);
-          });
+    // 패널 — 컨테이너를 패널 좌상단으로 옮겨 내부 좌표를 패널 로컬로 단순화.
+    const panel = this.add.container(PX, PY);
+    m.add(panel);
+    panel.add(
+      this.add
+        .rectangle(0, 0, PW, 248, 0x1a1008, 1)
+        .setOrigin(0, 0)
+        .setStrokeStyle(1, 0x3d2b1a, 1)
+        .setInteractive() // 패널 내부 클릭이 스크림(닫기)으로 새지 않게 흡수
+    );
 
-          if (!prereqOk) craftBtn.set(false, '선행 필요', FILL.disabled, C.btnDark);
-          else if (!GameState.canAfford(eff)) craftBtn.set(false, '재료 부족', FILL.disabled, C.btnDark);
-          else craftBtn.set(true, '제작', FILL.active, C.ink);
+    // 아이콘(48px, 중앙 상단)
+    mw.icon = this.add.image(160, 36, 'pipe_wrench').setOrigin(0.5);
+    panel.add(mw.icon);
+
+    // 무기 이름(좌측) + 별점(중앙)
+    mw.name = this.add
+      .text(20, 76, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.gold })
+      .setOrigin(0, 0.5);
+    mw.name.setShadow(1, 1, '#000000', 0, false, true);
+    panel.add(mw.name);
+    mw.starGfx = this.add.graphics();
+    panel.add(mw.starGfx);
+
+    // 구분선
+    panel.add(this.add.rectangle(16, 90, PW - 32, 1, 0x000000, 0.4).setOrigin(0, 0.5));
+
+    // 능력 설명 — 13px 밝은 베이지(11px·어두운 회색은 한글 가독 floor 아래).
+    mw.ability = this.add
+      .text(16, 100, '', {
+        fontFamily: BODY_FONT,
+        fontSize: '13px',
+        color: C.body,
+        wordWrap: { width: 288 }
+      })
+      .setOrigin(0, 0);
+    mw.ability.setShadow(1, 1, '#000000', 0, false, true);
+    panel.add(mw.ability);
+
+    // 현재 스탯 / 다음 스탯
+    mw.curStat = this.add
+      .text(16, 125, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.gold })
+      .setOrigin(0, 0.5);
+    mw.curStat.setShadow(1, 1, '#000000', 0, false, true);
+    mw.nextStat = this.add
+      .text(16, 141, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.toxic })
+      .setOrigin(0, 0.5);
+    mw.nextStat.setShadow(1, 1, '#000000', 0, false, true);
+    panel.add([mw.curStat, mw.nextStat]);
+
+    // 구분선
+    panel.add(this.add.rectangle(16, 156, PW - 32, 1, 0x000000, 0.4).setOrigin(0, 0.5));
+
+    // 재료칩 — 최대 4칸(아이콘 16px + 보유/필요). 키/수량은 refresh가 채운다.
+    mw.chips = [];
+    for (let k = 0; k < 4; k++) {
+      const px = 20 + k * 72;
+      const py = 170;
+      const chipIcon = this.add.image(px, py, 'pipe_wrench').setOrigin(0.5).setVisible(false);
+      const chipFallback = this.add
+        .rectangle(px, py, 12, 12, 0x8a6a3a)
+        .setOrigin(0.5)
+        .setStrokeStyle(1, 0x000000, 0.5)
+        .setVisible(false);
+      const chipTxt = this.add
+        .text(px + 12, py, '', { fontFamily: BODY_FONT, fontSize: '11px', color: C.gray })
+        .setOrigin(0, 0.5);
+      chipTxt.setShadow(1, 1, '#000000', 0, false, true);
+      panel.add([chipFallback, chipIcon, chipTxt]);
+      mw.chips.push({ icon: chipIcon, fallback: chipFallback, txt: chipTxt });
+    }
+
+    // 구분선
+    panel.add(this.add.rectangle(16, 194, PW - 32, 1, 0x000000, 0.4).setOrigin(0, 0.5));
+
+    // 강화 / 장착 / 닫기 버튼 — 버튼은 현재 모달 id(this._modalWeaponId)로 동작(1세트 재사용).
+    // 좌측 버튼은 미보유=제작 / 보유=강화로 한 버튼이 두 동작을 겸한다(refresh가 라벨 토글).
+    mw.enhBtn = this.makeButton(80, 214, 100, 26, () => {
+      const id = this._modalWeaponId;
+      if (!id) return;
+      const recipe = WEAPON_RECIPES[id];
+      if (GameState.ownedWeapons.has(id)) {
+        if (GameState.enhanceWeapon(id)) SFX.play('enhance'); // 'change' → refreshWeaponModal
+      } else {
+        if (recipe.requires && !GameState.ownedWeapons.has(recipe.requires)) return;
+        if (GameState.craftWeapon(id, recipe.cost)) {
+          GameState.equipWeapon(id); // 제작 후 자동 장착
+          SFX.play('craft');
         }
       }
-    );
+    }, panel);
+    mw.equipBtn = this.makeButton(240, 214, 100, 26, () => {
+      const id = this._modalWeaponId;
+      if (id && GameState.equipWeapon(id)) SFX.play('tab');
+    }, panel);
+    const closeBtn = this.makeButton(160, 240, 200, 22, () => this.closeWeaponModal(), panel);
+    closeBtn.set(true, '닫기', 0x3d2b1a, C.gold);
+
+    this._modalWidgets = mw;
+  }
+
+  openWeaponModal(id) {
+    this.ensureWeaponModal();
+    this._modalWeaponId = id;
+    this.weaponModal.setVisible(true);
+    this.refreshWeaponModal(id);
+    SFX.play('tab');
+  }
+
+  // 별점·스탯·재료칩·버튼 상태 갱신. 'change'(강화/장착) 시 refreshCraft가 호출한다.
+  refreshWeaponModal(id) {
+    const mw = this._modalWidgets;
+    if (!mw) return;
+    const recipe = WEAPON_RECIPES[id];
+    if (!recipe) return;
+
+    const owned = GameState.ownedWeapons.has(id);
+    const equipped = GameState.equippedWeapon === id;
+    const prereqOk = !recipe.requires || GameState.ownedWeapons.has(recipe.requires);
+    const level = owned ? GameState.weaponLevels[id] || 0 : 0;
+    const atMax = level >= ENHANCE_MAX_LEVEL;
+    const playerAtk = GameState.stats.atk;
+
+    // 아이콘(48px)
+    if (this.textures.exists(id)) {
+      const src = this.textures.get(id).getSourceImage();
+      mw.icon.setTexture(id).setScale(48 / src.height);
+    }
+
+    mw.name.setText(recipe.name);
+    drawStars(mw.starGfx, 160, 70, level);
+
+    mw.ability.setText(recipe.ability).setColor(ATTR_COLOR[recipe.attrTag] || C.body);
+
+    // 현재 스탯 / 다음 스탯(강화 미리보기). 미보유면 다음줄 비움.
+    const atk = (recipe.atkBonus || 0) + level * ENHANCE_ATK_PER_LEVEL;
+    const dps = getWeaponDPS(id, level, playerAtk);
+    mw.curStat.setText(`공격 ${atk} · 딜 ${dps}`);
+    if (owned && !atMax) {
+      const nAtk = (recipe.atkBonus || 0) + (level + 1) * ENHANCE_ATK_PER_LEVEL;
+      const nDps = getWeaponDPS(id, level + 1, playerAtk);
+      mw.nextStat.setText(`강화 시: 공격 ${nAtk} · 딜 ${dps}→${nDps}`);
+    } else {
+      mw.nextStat.setText('');
+    }
+
+    // 재료칩 — 보유=강화 비용(다음 레벨), 미보유=제작 비용(first_forge 할인 반영).
+    //   first_forge 할인은 craft에만 적용 — 강화 비용(enhanceCost)엔 무관.
+    let cost;
+    if (owned) cost = atMax ? {} : enhanceCost(id, level + 1);
+    else {
+      const base =
+        Object.keys(recipe.cost || {}).length > 0 ? recipe.cost : ENHANCE_BASE_COST[id] || {};
+      cost = GameState.effectiveCraftCost(base);
+    }
+    const costKeys = Object.keys(cost);
+    mw.chips.forEach((chip, k) => {
+      const matKey = costKeys[k];
+      if (!matKey) {
+        chip.icon.setVisible(false);
+        chip.fallback.setVisible(false);
+        chip.txt.setVisible(false);
+        return;
+      }
+      const need = cost[matKey] || 0;
+      const have = GameState.materials[matKey] || 0;
+      const meta = MATERIAL_META[matKey];
+      if (meta && this.textures.exists(meta.iconKey)) {
+        const src = this.textures.get(meta.iconKey).getSourceImage();
+        chip.icon.setTexture(meta.iconKey).setScale(16 / src.height).setVisible(true);
+        chip.fallback.setVisible(false);
+      } else {
+        chip.icon.setVisible(false);
+        chip.fallback.setFillStyle(GRADE_COLOR[meta?.grade] || 0x8a6a3a, 1).setVisible(true);
+      }
+      chip.txt.setText(`${have}/${need}`).setColor(have >= need ? C.toxic : C.orange).setVisible(true);
+    });
+
+    // 강화 버튼 — 미보유: 제작 / 보유·MAX: MAX / 보유: afford 토글.
+    if (!owned) {
+      if (!prereqOk) mw.enhBtn.set(false, '선행 필요', FILL.disabled, C.btnDark);
+      else if (!GameState.canAfford(cost)) mw.enhBtn.set(false, '재료 부족', FILL.disabled, C.btnDark);
+      else mw.enhBtn.set(true, '제작', FILL.active, C.ink);
+    } else if (atMax) {
+      mw.enhBtn.set(false, 'MAX', FILL.disabled, C.gold);
+    } else if (!GameState.canAfford(cost)) {
+      mw.enhBtn.set(false, '강화', FILL.disabled, C.btnDark);
+    } else {
+      mw.enhBtn.set(true, '강화', FILL.active, C.ink);
+    }
+
+    // 장착 버튼 — 미보유: 비활성 / 장착중: 표기 / 보유: 활성.
+    if (!owned) mw.equipBtn.set(false, '장착', FILL.disabled, C.btnDark);
+    else if (equipped) mw.equipBtn.set(false, '장착 중', FILL.disabled, C.gold);
+    else mw.equipBtn.set(true, '장착', FILL.active, C.ink);
+  }
+
+  closeWeaponModal() {
+    if (this.weaponModal) this.weaponModal.setVisible(false);
+    this._modalWeaponId = null;
   }
 
   // ── 인벤 탭 — 보유 재료(슬롯 그리드) + 발견한 무기 도감 ─────────────────
@@ -833,7 +941,7 @@ export default class HubScene extends Phaser.Scene {
     this.layer(
       this.add.text(CONTENT.x + 4, CONTENT.y + 6, '재료', {
         fontFamily: PIXEL_FONT, // 섹션 타이틀 — 픽셀 톤 유지(크기 ↑)
-        fontSize: '15px',
+        fontSize: '17px',
         color: C.gold
       })
     );
@@ -884,7 +992,7 @@ export default class HubScene extends Phaser.Scene {
       const name = this.add
         .text(textX, cy - 7, meta.name, {
           fontFamily: BODY_FONT,
-          fontSize: '11px',
+          fontSize: '13px',
           color: C.gold
         })
         .setOrigin(0, 0.5);
@@ -892,7 +1000,7 @@ export default class HubScene extends Phaser.Scene {
       const qty = this.add
         .text(textX, cy + 8, '0', {
           fontFamily: PIXEL_FONT,
-          fontSize: '12px',
+          fontSize: '13px',
           color: C.toxic
         })
         .setOrigin(0, 0.5);
@@ -913,7 +1021,7 @@ export default class HubScene extends Phaser.Scene {
     this.codexCountTxt = this.add
       .text(CONTENT.x + 4, headerY + 6, `발견한 무기 0/${WEAPON_ORDER.length}`, {
         fontFamily: BODY_FONT, // 한글 섹션 라벨 — BODY로
-        fontSize: '11px',
+        fontSize: '13px',
         color: C.gold
       })
       .setOrigin(0, 0.5);
@@ -1006,7 +1114,7 @@ export default class HubScene extends Phaser.Scene {
     this.layer(
       this.add.text(CONTENT.x + 4, CONTENT.y + 6, '영구 강화', {
         fontFamily: PIXEL_FONT, // 섹션 타이틀 — 픽셀 톤 유지(크기 ↑)
-        fontSize: '15px',
+        fontSize: '17px',
         color: C.gold
       })
     );
@@ -1016,7 +1124,7 @@ export default class HubScene extends Phaser.Scene {
       this.add
         .text(CONTENT.x + CONTENT.w - 90, CONTENT.y + 13, '잔해', {
           fontFamily: BODY_FONT, // 한글 화폐 라벨 — BODY로
-          fontSize: '11px',
+          fontSize: '13px',
           color: C.gray
         })
         .setOrigin(0, 0.5)
@@ -1024,7 +1132,7 @@ export default class HubScene extends Phaser.Scene {
     this.spBalTxt = this.add
       .text(CONTENT.x + CONTENT.w - 8, CONTENT.y + 13, '0', {
         fontFamily: PIXEL_FONT,
-        fontSize: '12px',
+        fontSize: '13px',
         color: C.toxic
       })
       .setOrigin(1, 0.5);
@@ -1068,7 +1176,7 @@ export default class HubScene extends Phaser.Scene {
         this.add
           .text(CONTENT.x + 24, cy - 9, def.label, {
             fontFamily: BODY_FONT, // 한글 영구강화 항목명 — BODY로
-            fontSize: '11px',
+            fontSize: '13px',
             color: C.gold
           })
           .setOrigin(0, 0.5)
@@ -1078,7 +1186,7 @@ export default class HubScene extends Phaser.Scene {
       const descTxt = this.add
         .text(CONTENT.x + 24, cy + 8, '', {
           fontFamily: BODY_FONT,
-          fontSize: '11px',
+          fontSize: '13px',
           color: C.gray
         })
         .setOrigin(0, 0.5);
@@ -1144,7 +1252,7 @@ export default class HubScene extends Phaser.Scene {
     this.layer(
       this.add.text(CONTENT.x + 4, CONTENT.y + 6, tab.label, {
         fontFamily: PIXEL_FONT, // 섹션 타이틀 — 픽셀 톤 유지(크기 ↑)
-        fontSize: '15px',
+        fontSize: '17px',
         color: C.gold
       })
     );
@@ -1152,7 +1260,7 @@ export default class HubScene extends Phaser.Scene {
       this.add
         .text(CONTENT.x + CONTENT.w / 2, CONTENT.y + CONTENT.h / 2, '준비 중입니다', {
           fontFamily: BODY_FONT, // 한글 안내문 — BODY로 가독성
-          fontSize: '12px',
+          fontSize: '13px',
           color: C.stub
         })
         .setOrigin(0.5)

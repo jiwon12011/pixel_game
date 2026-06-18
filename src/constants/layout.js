@@ -1,7 +1,14 @@
 // 화면 구조 상수 — 한 곳에서 비율/좌표를 관리해 다음 단계(전투/합성)가 안전하게 얹히도록.
 
-// 논리 해상도: 모바일 세로. Scale.FIT으로 실제 화면에 맞춰 확대/축소된다.
+// 논리 해상도: 모바일 세로. 게임 좌표계는 항상 이 360×640다(모든 하드코딩 좌표·fontSize 기준).
 export const LOGICAL = { width: 360, height: 640 };
+
+// 백버퍼 배율 — GL 드로잉 버퍼를 논리해상도의 RENDER_SCALE배(720×1280)로 렌더해
+// 작은 한글이 업스케일에서 뭉개지지 않게 한다. gameConfig가 gameSize를 LOGICAL×RENDER_SCALE로 잡고,
+// 각 씬 카메라는 setZoom(RENDER_SCALE).setOrigin(0,0)으로 360 월드를 그 버퍼에 꽉 채운다.
+// 핵심: Scale.FIT은 config의 zoom을 백버퍼(baseSize)에 반영하지 않으므로(Phaser 3.90 ScaleManager
+//       baseSize=gameSize, displaySize만 ×zoom) gameSize 자체를 키워야 버퍼가 커진다.
+export const RENDER_SCALE = 2;
 
 // 세로 2분할 — 전투 58% / 합성 허브 42% (기획서 "화면 구조")
 export const SPLIT = { combat: 0.58, hub: 0.42 };
@@ -9,9 +16,20 @@ export const SPLIT = { combat: 0.58, hub: 0.42 };
 export const COMBAT_H = Math.round(LOGICAL.height * SPLIT.combat); // 371
 export const HUB_H = LOGICAL.height - COMBAT_H; // 269
 
-// 각 씬 카메라 뷰포트 (논리 픽셀 기준, Scale이 함께 확대)
-export const COMBAT_VIEW = { x: 0, y: 0, width: LOGICAL.width, height: COMBAT_H };
-export const HUB_VIEW = { x: 0, y: COMBAT_H, width: LOGICAL.width, height: HUB_H };
+// 각 씬 카메라 뷰포트 — 백버퍼(렌더) 픽셀 기준이라 RENDER_SCALE을 곱한다(720×742 / 720×538).
+// 카메라 setZoom(RENDER_SCALE)이 360 월드 좌표를 이 뷰포트에 1:1로 채운다.
+export const COMBAT_VIEW = {
+  x: 0,
+  y: 0,
+  width: LOGICAL.width * RENDER_SCALE,
+  height: COMBAT_H * RENDER_SCALE
+};
+export const HUB_VIEW = {
+  x: 0,
+  y: COMBAT_H * RENDER_SCALE,
+  width: LOGICAL.width * RENDER_SCALE,
+  height: HUB_H * RENDER_SCALE
+};
 
 // 경계 픽셀 장식띠 높이
 export const BORDER_H = 8;

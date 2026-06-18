@@ -19,6 +19,13 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/gh/quiple/galmuri/dist/galmuri.css"
     />
+    <!-- Noto Sans KR: 한글 본문/라벨용 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap"
+    />
 
     <style>
       :root {
@@ -43,10 +50,9 @@
         height: 100dvh;
         width: 100vw;
       }
-      /* 픽셀 아트가 업스케일돼도 또렷하게 — 캔버스 보간 끄기 */
+      /* 브라우저 기본 bilinear 스케일 유지 — 텍스트 가독성.
+         픽셀 아트 스프라이트는 Phaser 내부 NEAREST 필터로 선명도 보장. */
       #game-root canvas {
-        image-rendering: pixelated;
-        image-rendering: crisp-edges;
         touch-action: none;
       }
     </style>

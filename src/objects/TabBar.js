@@ -50,7 +50,7 @@ export default class TabBar extends Phaser.GameObjects.Container {
       const label = scene.add
         .text(cx, cy + (icon ? cfg.height * 0.3 : 0), tab.label, {
           fontFamily: BODY_FONT, // 한글 탭 라벨(합성/강화/능력치/인벤) — 픽셀폰트 자소 뭉갬, BODY로
-          fontSize: '11px',
+          fontSize: '13px', // 11px는 한글 가독 floor 아래(능력치→능력시 뭉갬) → 13px
           color: '#cbb89a'
         })
         .setOrigin(0.5);

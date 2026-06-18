@@ -347,6 +347,17 @@ const GameState = {
     this._markRunDirty();
   },
 
+  // ── 설정: 현재 런만 초기화 (메타/유산 보존) ───────────────────────────────
+  // 설정 화면 "런 포기/초기화"용. resetRun은 내부 사이클(startNewRun)에서도 쓰여
+  // emit을 안 하므로, 외부 진입점은 이 래퍼로 'change' 발행 + 즉시 저장까지 책임진다.
+  // 유산은 주입하지 않는다(현재 런을 깨끗한 base로 되돌림). meta는 그대로.
+  resetRunPublic() {
+    this.resetRun(null);
+    this.flushRun(); // 디바운스 대기 없이 즉시 영속(설정 액션은 손실 민감)
+    emit('change');
+    return true;
+  },
+
   // 유산 1개를 새 런 시작값에 반영. (carry는 base 위에 가산/대체)
   applyLegacy(legacy) {
     switch (legacy.type) {
@@ -478,6 +489,29 @@ const GameState = {
     } catch {
       /* noop — 저장 실패해도 진행 계속 */
     }
+  },
+
+  // ── 설정: 전체 세이브 초기화 (런 + 메타 영구 데이터까지) ────────────────────
+  // RUN_KEY/META_KEY를 지우고 메모리 상태도 공장초기값으로 되돌린다. 영속 자체를 끊기
+  // 위해 예약된 디바운스 flush도 취소한다(지운 직후 재기록 방지). 실제 깨끗한 부팅은
+  // 호출 측에서 location.reload()로 마무리한다 — 이 함수는 storage/메모리만 정리하고 true 반환.
+  wipeAllSaves() {
+    if (this._runFlushHandle != null) {
+      clearTimeout(this._runFlushHandle);
+      this._runFlushHandle = null;
+    }
+    this._runDirty = false;
+    try {
+      localStorage.removeItem(RUN_KEY);
+      localStorage.removeItem(META_KEY);
+    } catch {
+      /* noop — 제거 실패해도 메모리는 초기화하고 reload로 정리됨 */
+    }
+    // 메모리 상태 초기값으로 — reload 전에 어떤 코드가 읽어도 잔여 데이터가 안 보이게.
+    Object.assign(this, baseRun());
+    this.meta = freshMeta();
+    this.runResistance = deriveResistance(this.meta.enemyMemory.tally);
+    return true;
   },
 
   load() {

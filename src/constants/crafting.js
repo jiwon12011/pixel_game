@@ -311,15 +311,15 @@ export const WEAPON_ORDER = [
 ];
 
 // ── 무기 강화 (런 스코프) ──────────────────────────────────────────────
-// 제작=해금 이후, 같은 레시피 재료를 점점 많이 써서 Lv1~5까지 강화. 레벨당 +6 atk(체감 의미화).
+// 제작=해금 이후, 같은 레시피 재료를 점점 많이 써서 Lv1~10까지 강화. 레벨당 +5 atk(체감 의미화).
 // 강화 레벨은 GameState.weaponLevels(런 한정)에 저장 → 사망 시 리셋.
 //   ENHANCE_BASE_COST — cost가 빈 무기(pipe_wrench 등)의 강화 비용 폴백 재료.
-export const ENHANCE_MAX_LEVEL = 5;
+export const ENHANCE_MAX_LEVEL = 10;
 // 비용 곡선: 선형(×레벨×0.5)은 후반이 너무 싸 의미가 없었다 → 지수 곡선으로 교체.
-//   mult = BASE_MULT × EXP^(targetLevel-1) → Lv1=원가×1.0, Lv5=원가×~6.5.
+//   mult = BASE_MULT × EXP^(targetLevel-1). Lv10까지 늘어 곡선을 완만하게(1.6→1.35) 보정.
 export const ENHANCE_COST_BASE_MULT = 1.0;
-export const ENHANCE_COST_EXP = 1.6;
-export const ENHANCE_ATK_PER_LEVEL = 6;
+export const ENHANCE_COST_EXP = 1.35;
+export const ENHANCE_ATK_PER_LEVEL = 5;
 export const ENHANCE_BASE_COST = { pipe_wrench: { rusty_screws: 3 } }; // cost 빈 무기 폴백
 
 // 강화 비용 — targetLevel = 도달할 레벨(Lv0→1이면 1). 레시피 cost(없으면 폴백)에 지수 배율을 곱해 올림.

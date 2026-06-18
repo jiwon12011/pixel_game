@@ -10,6 +10,7 @@ import {
   GROUND_LINE_RATIO,
   LOGICAL,
   PARALLAX,
+  RENDER_SCALE,
   deriveStage
 } from '../constants/layout.js';
 import { PALETTE } from '../constants/palette.js';
@@ -97,12 +98,16 @@ export default class CombatScene extends Phaser.Scene {
     // 카메라 뷰포트 히트테스트로 직접 판정해 입력 어긋남을 원천 회피한다.
     this.input.on('pointerdown', this.onCombatTap, this);
 
+    // 뷰포트는 백버퍼(720) 픽셀 기준 — COMBAT_VIEW가 이미 RENDER_SCALE을 곱한 값.
+    // setZoom(RENDER_SCALE)+setOrigin(0,0): 360 월드 좌표 (0,0)~(360,371)을 이 뷰포트에 1:1로 채운다.
+    // origin(0,0)이라야 줌 피벗이 뷰포트 좌상단 → 월드(0,0)=뷰포트 좌상단(스크롤 0).
     this.cameras.main.setViewport(
       COMBAT_VIEW.x,
       COMBAT_VIEW.y,
       COMBAT_VIEW.width,
       COMBAT_VIEW.height
     );
+    this.cameras.main.setZoom(RENDER_SCALE).setOrigin(0, 0);
     this.cameras.main.setBackgroundColor(PALETTE.bgSky);
 
     this.parallax = new ParallaxBackground(this, this.motionOk);
@@ -124,7 +129,7 @@ export default class CombatScene extends Phaser.Scene {
     this.createHud();
     this.createWaveHud();
     this.createResourceHud();
-    this.createMuteButton();
+    this.createSettingsButton();
     this.createToast();
 
     this.bindGameState();
@@ -1116,7 +1121,7 @@ export default class CombatScene extends Phaser.Scene {
   }
 
   // ── 보스 HP바 (화면 상단 큰 바 — 머리 위 작은 바와 별개) ───────────────────
-  // 좌상단 HP/웨이브 HUD 아래(y≈52)에 가로 풀폭으로 깔아 눈에 띄게. depth 74:
+  // 좌상단 HP/웨이브 HUD 아래(y≈74)에 가로 풀폭으로 깔아 눈에 띄게. depth 74:
   // 일반 HUD(60~61)보다 위, 웨이브 배너(75)/보스 배너(76)보다 아래(배너가 잠깐 위를 덮음).
   // 사망/업그레이드 오버레이(88/90)보다는 당연히 아래.
   createBossHpBar(stats) {
@@ -1125,7 +1130,8 @@ export default class CombatScene extends Phaser.Scene {
     const barW = W - 32;
     const barH = 12;
     const x = 16;
-    const y = 52;
+    // 좌상단 웨이브 HUD(HP바~웨이브 진행바, y8~68)와 안 겹치게 그 아래로. (기존 52는 웨이브바와 충돌)
+    const y = 74;
 
     const container = this.add.container(0, 0).setDepth(74);
     const frame = this.add
@@ -1138,7 +1144,7 @@ export default class CombatScene extends Phaser.Scene {
       // 10px 소형 텍스트라 순수 danger(#ff2a2a)보다 살짝 밝혀 가독 확보 + 검정 그림자.
       .text(W / 2, y + barH + 9, `⚠ BOSS · ${stats.def.name}`, {
         fontFamily: BODY_FONT, // 한글 보스명 — 픽셀 10px 자소 뭉갬, BODY 11px로
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#ff5a4a'
       })
       .setOrigin(0.5);
@@ -1203,7 +1209,7 @@ export default class CombatScene extends Phaser.Scene {
     const sub = this.add
       .text(0, 24, stats.def.name, {
         fontFamily: BODY_FONT,
-        fontSize: '12px',
+        fontSize: '13px',
         color: '#ffd24a'
       })
       .setOrigin(0.5);
@@ -1251,16 +1257,20 @@ export default class CombatScene extends Phaser.Scene {
   // 자동 평타 쿨다운과 독립: 탭은 쿨다운을 무시하고 바로 때려 DPS를 올린다.
   // 가드: 오버레이 중·전투 미준비·모션 진행 중·최소 간격 미만 연타는 무시(애니/성능 보호).
   onCombatTap(pointer) {
-    // 음소거 버튼 히트(오버레이 없을 때만 — 그때만 버튼이 보임) → 토글 후 공격으로 넘어가지 않음.
-    const mb = this._muteBounds;
-    if (
-      mb && !this.deathLayer && !this.upgradeLayer &&
-      pointer.x >= mb.x && pointer.x <= mb.x + mb.w &&
-      pointer.y >= mb.y && pointer.y <= mb.y + mb.h
-    ) {
-      SFX.toggleMute();
-      this._redrawMuteIcon();
-      return;
+    const cam = this.cameras.main;
+    // 환경설정 톱니 버튼 히트(오버레이 없을 때만 — 그때만 버튼이 보임) → 설정 씬을 열고 공격 안 함.
+    // _settingsBounds는 월드(360) 좌표 — 포인터(백버퍼 720)를 카메라 역변환(getWorldPoint)해 비교한다.
+    // 카메라 줌(RENDER_SCALE)/오프셋 뷰포트가 자동 반영돼 좌표계가 어긋나지 않는다.
+    const sb = this._settingsBounds;
+    if (sb && !this.deathLayer && !this.upgradeLayer) {
+      const wp = cam.getWorldPoint(pointer.x, pointer.y);
+      if (
+        wp.x >= sb.x && wp.x <= sb.x + sb.w &&
+        wp.y >= sb.y && wp.y <= sb.y + sb.h
+      ) {
+        if (!this.scene.isActive('SettingsScene')) this.scene.launch('SettingsScene');
+        return;
+      }
     }
     // 사망/업그레이드 오버레이가 떠 있으면 탭 공격 안 함(오버레이 입력과 충돌 방지).
     if (this.deathLayer || this.upgradeLayer) return;
@@ -1271,8 +1281,7 @@ export default class CombatScene extends Phaser.Scene {
     const now = this.time.now;
     if (now - this._lastTapAttack < 140) return;
 
-    // Combat 뷰포트(상단) 밖 터치(=Hub 영역)는 무시.
-    const cam = this.cameras.main;
+    // Combat 뷰포트(상단) 밖 터치(=Hub 영역)는 무시. 포인터·뷰포트 모두 백버퍼(720) 공간이라 직접 비교.
     if (
       pointer.x < cam.x || pointer.x > cam.x + cam.width ||
       pointer.y < cam.y || pointer.y > cam.y + cam.height
@@ -1413,7 +1422,7 @@ export default class CombatScene extends Phaser.Scene {
     const runText = this.add
       .text(16, 50, `RUN #${runNo}`, {
         fontFamily: PIXEL_FONT,
-        fontSize: '12px',
+        fontSize: '13px',
         color: '#f0c040'
       })
       .setOrigin(0, 0.5);
@@ -1427,7 +1436,7 @@ export default class CombatScene extends Phaser.Scene {
       spText = this.add
         .text(W - 16, 50, `+${spEarned} 잔해 포인트`, {
           fontFamily: BODY_FONT, // 한글 라벨 — BODY로
-          fontSize: '11px',
+          fontSize: '13px',
           color: '#20ff9a'
         })
         .setOrigin(1, 0.5);
@@ -1441,7 +1450,7 @@ export default class CombatScene extends Phaser.Scene {
     const stageText = this.add
       .text(W / 2, 50, `단계 ${runStage} · 역대 ${bestStage}`, {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#cbb89a'
       })
       .setOrigin(0.5);
@@ -1471,7 +1480,7 @@ export default class CombatScene extends Phaser.Scene {
       const t = this.add
         .text(W / 2, 94 + i * 14, line, {
           fontFamily: BODY_FONT, // 한글 라벨+수치 — 픽셀은 자소 뭉갬, BODY로 가독성 ↑
-          fontSize: '11px',
+          fontSize: '13px',
           color: '#cbb89a'
         })
         .setOrigin(0.5);
@@ -1487,7 +1496,7 @@ export default class CombatScene extends Phaser.Scene {
     const subtitleText = this.add
       .text(W / 2, 177, '유산 1개를 들고 새 런 시작', {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#9a8b78'
       })
       .setOrigin(0.5);
@@ -1521,7 +1530,7 @@ export default class CombatScene extends Phaser.Scene {
     const btnLabel = this.add
       .text(W / 2, 322, anyEnabled ? '들고 시작' : '새 런 시작', {
         fontFamily: BODY_FONT, // 한글 버튼 라벨 — BODY로
-        fontSize: '12px',
+        fontSize: '13px',
         color: '#1a1008'
       })
       .setOrigin(0.5);
@@ -1706,7 +1715,7 @@ export default class CombatScene extends Phaser.Scene {
       const label = this.add
         .text(0, 0, `${attr} ${n}`, {
           fontFamily: PIXEL_FONT,
-          fontSize: '9px',
+          fontSize: '11px',
           color: toHexStr(colorNum)
         })
         .setOrigin(0, 0.5);
@@ -1716,7 +1725,7 @@ export default class CombatScene extends Phaser.Scene {
     });
 
     const prefix = this.add
-      .text(0, 0, '주력', { fontFamily: BODY_FONT, fontSize: '10px', color: '#8a7c68' })
+      .text(0, 0, '주력', { fontFamily: BODY_FONT, fontSize: '12px', color: '#8a7c68' })
       .setOrigin(0, 0.5);
     const prefixGap = 8;
 
@@ -1756,10 +1765,10 @@ export default class CombatScene extends Phaser.Scene {
 
     const row = this.add.container(W / 2, cy);
     const prefix = this.add
-      .text(0, 0, '제작', { fontFamily: BODY_FONT, fontSize: '10px', color: '#8a7c68' })
+      .text(0, 0, '제작', { fontFamily: BODY_FONT, fontSize: '12px', color: '#8a7c68' })
       .setOrigin(0, 0.5);
     const name = this.add
-      .text(0, 0, rec.name, { fontFamily: BODY_FONT, fontSize: '11px', color: '#f0c040' })
+      .text(0, 0, rec.name, { fontFamily: BODY_FONT, fontSize: '13px', color: '#f0c040' })
       .setOrigin(0, 0.5);
     name.setShadow(1, 1, '#000000', 0, false, true);
 
@@ -1804,14 +1813,14 @@ export default class CombatScene extends Phaser.Scene {
     const title = this.add
       .text(0, -12, this.legacyTitle(opt), {
         fontFamily: BODY_FONT, // 한글 카드 제목(무기/재료/코인/스탯) — 픽셀 11px 자소 뭉갬, BODY로
-        fontSize: '11px',
+        fontSize: '13px',
         color: enabled ? '#f0c040' : '#5a4f3e'
       })
       .setOrigin(0.5);
     const detail = this.add
       .text(0, 8, this.legacyDetail(opt), {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: enabled ? '#cbb89a' : '#4f463a',
         align: 'center'
       })
@@ -1825,7 +1834,7 @@ export default class CombatScene extends Phaser.Scene {
       const note = this.add
         .text(0, 19, '(강화 Lv 초기화)', {
           fontFamily: BODY_FONT,
-          fontSize: '9px', // 카드 하단 좁은 자리 주석 — 9px로 절제(픽셀 8px 대비 BODY가 또렷)
+          fontSize: '11px', // 카드 하단 좁은 자리 주석 — 9px로 절제(픽셀 8px 대비 BODY가 또렷)
           color: '#8a7a64'
         })
         .setOrigin(0.5);
@@ -2051,7 +2060,7 @@ export default class CombatScene extends Phaser.Scene {
     const tag = this.add
       .text(this.character.x, this.groundY - this.charDisplayH * 0.8, '방벽', {
         fontFamily: BODY_FONT, // 한글 태그 — BODY로
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#bfe3ff'
       })
       .setOrigin(0.5)
@@ -2119,7 +2128,7 @@ export default class CombatScene extends Phaser.Scene {
       const subtitle = this.add
         .text(W / 2, H * 0.2 + 22, '버프 1개 선택 · 이번 런 한정', {
           fontFamily: BODY_FONT,
-          fontSize: '11px',
+          fontSize: '13px',
           color: '#9a8b78'
         })
         .setOrigin(0.5);
@@ -2194,7 +2203,7 @@ export default class CombatScene extends Phaser.Scene {
     const name = this.add
       .text(0, -h * 0.3, up.name, {
         fontFamily: BODY_FONT, // 한글 버프 이름 — 픽셀 13px 자소 뭉갬, BODY로
-        fontSize: '13px',
+        fontSize: '14px',
         color: hex
       })
       .setOrigin(0.5);
@@ -2202,7 +2211,7 @@ export default class CombatScene extends Phaser.Scene {
     const desc = this.add
       .text(0, h * 0.12, up.desc, {
         fontFamily: BODY_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#cbb89a',
         align: 'center',
         wordWrap: { width: w - 18 }
@@ -2323,9 +2332,9 @@ export default class CombatScene extends Phaser.Scene {
   // ── HUD: 주인공 HP바 (전투뷰 상단) ──────────────────────────────────
   createHud() {
     const x = 10;
-    const y = 10;
-    const w = 124;
-    const h = 9;
+    const y = 8;
+    const w = 132;
+    const h = 13;
     this.hpBarW = w;
 
     this.add
@@ -2342,9 +2351,9 @@ export default class CombatScene extends Phaser.Scene {
       .setDepth(61);
 
     this.add
-      .text(x, y + h + 4, 'SCRAPPER', {
+      .text(x, 28, 'SCRAPPER', {
         fontFamily: PIXEL_FONT,
-        fontSize: '8px',
+        fontSize: '10px',
         color: '#cbb89a'
       })
       .setOrigin(0, 0)
@@ -2363,9 +2372,9 @@ export default class CombatScene extends Phaser.Scene {
   createWaveHud() {
     const x = 10;
     this.waveText = this.add
-      .text(x, 34, 'WAVE 0', {
+      .text(x, 44, 'WAVE 0', {
         fontFamily: PIXEL_FONT,
-        fontSize: '9px',
+        fontSize: '13px',
         color: '#ff6020'
       })
       .setOrigin(0, 0)
@@ -2375,27 +2384,27 @@ export default class CombatScene extends Phaser.Scene {
     // RUN #N — WAVE 옆(바 우측 끝선), 회차 표식. WAVE보다 위계상 위라 골드(#f0c040,
     // 사망 오버레이 RUN과 동일 톤)로 구분. 현재 진행 런 = runCount+1(사망 오버레이와 동일).
     this.runText = this.add
-      .text(82, 34, '', {
+      .text(82, 44, '', {
         fontFamily: PIXEL_FONT,
-        fontSize: '9px',
+        fontSize: '13px',
         color: '#f0c040'
       })
       .setOrigin(0, 0)
       .setDepth(61);
     this.runText.setShadow(1, 1, '#000000', 0, false, true);
 
-    const barY = 46;
-    this.waveBarW = 64;
+    const barY = 62;
+    this.waveBarW = 72;
     this.add
-      .rectangle(x, barY, this.waveBarW + 2, 5, 0x000000, 0.55)
+      .rectangle(x, barY, this.waveBarW + 2, 6, 0x000000, 0.55)
       .setOrigin(0, 0)
       .setDepth(60);
     this.waveBarTrack = this.add
-      .rectangle(x + 1, barY + 1, this.waveBarW, 3, PALETTE.hubSecondary)
+      .rectangle(x + 1, barY + 1, this.waveBarW, 4, PALETTE.hubSecondary)
       .setOrigin(0, 0)
       .setDepth(60);
     this.waveBarFill = this.add
-      .rectangle(x + 1, barY + 1, 0, 3, COMBAT_COLORS.toxic)
+      .rectangle(x + 1, barY + 1, 0, 4, COMBAT_COLORS.toxic)
       .setOrigin(0, 0)
       .setDepth(61);
 
@@ -2436,7 +2445,7 @@ export default class CombatScene extends Phaser.Scene {
     const sub = this.add
       .text(0, 18, subLabel, {
         fontFamily: BODY_FONT, // 한글 지역명 — 픽셀은 뭉개짐, BODY 11px로 가독성 ↑
-        fontSize: '11px',
+        fontSize: '13px',
         color: isNewRegion ? '#ffd24a' : '#cbb89a'
       })
       .setOrigin(0.5);
@@ -2500,7 +2509,7 @@ export default class CombatScene extends Phaser.Scene {
     const txt = this.add
       .text(x + 15, y, '0', {
         fontFamily: PIXEL_FONT,
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#f4ead2'
       })
       .setOrigin(0, 0.5)
@@ -2516,67 +2525,39 @@ export default class CombatScene extends Phaser.Scene {
     this.resHud.coins.txt.setText(String(GameState.coins));
   }
 
-  // ── 음소거 토글 버튼 (우상단, 작게) ─────────────────────────────────────
-  // 코드로 그린 픽셀 스피커 아이콘. 입력은 onCombatTap의 뷰포트 히트테스트로 처리(이 씬의
+  // ── 환경설정 진입 버튼 (우상단, 톱니) ───────────────────────────────────
+  // 코드로 그린 픽셀 톱니 아이콘. 입력은 onCombatTap의 뷰포트 히트테스트로 처리(이 씬의
   // 오프셋 뷰포트 환경에서 per-object setInteractive가 어긋나는 걸 피하는 기존 패턴 그대로).
-  createMuteButton() {
+  // 탭하면 SettingsScene을 launch(전체 화면 모달).
+  createSettingsButton() {
     const w = 18;
     const h = 16;
     const x = LOGICAL.width - w - 4;
     const y = 28;
-    this._muteBounds = { x, y, w, h };
+    this._settingsBounds = { x, y, w, h };
 
     this.add
       .rectangle(x, y, w, h, 0x000000, 0.5)
       .setOrigin(0, 0)
       .setStrokeStyle(1, 0x5a4631, 0.9)
       .setDepth(62);
-    this._muteIcon = this.add.graphics().setDepth(63);
-    this._redrawMuteIcon();
-
-    // 음소거 상태가 (예: 다른 경로로) 바뀌면 아이콘 동기화. shutdown 시 구독 해제(누수 방지).
-    const off = SFX.onMuteChange(() => this._redrawMuteIcon());
-    this.events.once('shutdown', off);
+    const g = this.add.graphics().setDepth(63);
+    this._drawGear(g, x + w / 2, y + h / 2, 5, 0xf0c040);
   }
 
-  // 스피커 아이콘 재그리기 — 음소거 시 회색 + 빨간 슬래시, 켜짐 시 골드 + 음파 2줄.
-  _redrawMuteIcon() {
-    const g = this._muteIcon;
-    if (!g) return;
-    const b = this._muteBounds;
-    const cx = b.x + b.w / 2;
-    const cy = b.y + b.h / 2;
-    const muted = SFX.isMuted();
-    const col = muted ? 0x8a7a6a : 0xf0c040;
-
+  // 픽셀 톱니 — 8방향 이빨(작은 사각) + 본체 원 + 가운데 어두운 구멍. clear→재드로 안전.
+  _drawGear(g, cx, cy, r, color) {
     g.clear();
-    g.fillStyle(col, 1);
-    // 스피커 몸통(채널 박스) + 콘(사다리꼴)
-    g.fillRect(cx - 6, cy - 2, 3, 4);
-    g.fillPoints(
-      [
-        { x: cx - 3, y: cy - 2 },
-        { x: cx, y: cy - 5 },
-        { x: cx, y: cy + 5 },
-        { x: cx - 3, y: cy + 2 }
-      ],
-      true
-    );
-
-    if (muted) {
-      // 음소거 — 빨간 슬래시.
-      g.lineStyle(2, 0xff5050, 1);
-      g.lineBetween(cx - 7, cy - 6, cx + 7, cy + 6);
-    } else {
-      // 켜짐 — 음파 2줄(콘 우측).
-      g.lineStyle(1.5, col, 1);
-      g.beginPath();
-      g.arc(cx + 1, cy, 4, -0.6, 0.6);
-      g.strokePath();
-      g.beginPath();
-      g.arc(cx + 1, cy, 7, -0.5, 0.5);
-      g.strokePath();
+    g.fillStyle(color, 1);
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4;
+      const tx = cx + Math.cos(a) * (r + 2);
+      const ty = cy + Math.sin(a) * (r + 2);
+      g.fillRect(Math.round(tx - 1.5), Math.round(ty - 1.5), 3, 3);
     }
+    g.fillCircle(cx, cy, r);
+    g.fillStyle(0x1a1008, 1); // 가운데 구멍
+    g.fillCircle(cx, cy, r * 0.42);
   }
 
   // ── 드롭 줍기 연출 ─────────────────────────────────────────────────────
@@ -2604,7 +2585,7 @@ export default class CombatScene extends Phaser.Scene {
     const label = this.add
       .text(sx + 9, y - 7, `×${count}`, {
         fontFamily: PIXEL_FONT,
-        fontSize: '8px',
+        fontSize: '10px',
         color: '#f4ead2'
       })
       .setOrigin(0, 0.5)
@@ -2758,7 +2739,7 @@ export default class CombatScene extends Phaser.Scene {
     this.toastText = this.add
       .text(-60, 0, '', {
         fontFamily: BODY_FONT, // "획득: <재료명> ×N" — 한글 재료명 가독성 위해 BODY 11px
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#ffffff'
       })
       .setOrigin(0, 0.5);
@@ -2849,7 +2830,7 @@ export default class CombatScene extends Phaser.Scene {
       label = this.add
         .text(x + driftX, y - 18, 'RESIST', {
           fontFamily: PIXEL_FONT,
-          fontSize: '8px',
+          fontSize: '10px',
           color: COMBAT_CSS.resisted
         })
         .setOrigin(0.5)

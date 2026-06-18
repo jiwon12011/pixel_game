@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { IMAGE_MANIFEST, WEAPON_MANIFEST } from '../assets/manifest.js';
-import { LOGICAL } from '../constants/layout.js';
+import { LOGICAL, RENDER_SCALE } from '../constants/layout.js';
 import { PALETTE } from '../constants/palette.js';
 import { PIXEL_FONT, BODY_FONT, PRELOAD_FONTS, installCrispText } from '../constants/fonts.js';
 import GameState from '../state/GameState.js';
@@ -13,6 +13,8 @@ export default class PreloadScene extends Phaser.Scene {
 
   preload() {
     installCrispText(this); // 모든 텍스트 2배 해상도 + 정수좌표(한글 선명화)
+    // 풀스크린 로딩 UI도 360 좌표 — 백버퍼 720에 맞춰 줌(다른 씬과 동일 규약).
+    this.cameras.main.setZoom(RENDER_SCALE).setOrigin(0, 0);
     this.drawLoadingUI();
 
     IMAGE_MANIFEST.forEach(({ key, url }) => this.load.image(key, url));
