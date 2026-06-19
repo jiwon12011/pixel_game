@@ -6,3 +6,10 @@
 node_modules/
 dist/
 .vite/
+
+# 옛 placeholder 에셋(ASSET_TODO: 사용 금지)
+assets/generated/
+
+# 애니메이션 파생/중간 산출물 — 스크립트로 재생성 가능
+assets/ai-generated/characters/animation/normalized/
+assets/ai-generated/characters/animation/source-edit/
