@@ -5,17 +5,29 @@
 // 데이터는 ideator 확정표. 배율은 drops.js rollDrop에서 각 재료 chance에 곱해진다(coins 제외).
 
 // 지역 정의 — id, 표시명, 시작 웨이브(startWave 오름차순). getRegion이 이 순서를 역순회.
+//
+// combatBonus(선택) — 지역 테마에 맞는 무기 속성 데미지 배율. 무기 attrTag(FIRE/TOXIC/SHOCK…)와
+// 매칭되는 채널만 곱연산으로 적용(사투 ×1.4·강화 배율과 자연 합산). 테마 분명한 지역에만 부여하고
+// 나머지는 필드 자체를 생략(getRegionCombatBonus가 1.0 폴백). 과하지 않게 1.25~1.45 범위.
+//   · 연료/고온 잔해 → FIRE   · 오염/약품 지대 → TOXIC   · 전기 설비 → SHOCK
 export const REGIONS = [
   { id: 'downtown', name: '도심 폐허', startWave: 0 },
-  { id: 'highway', name: '고속도로 잔해', startWave: 5 },
-  { id: 'factory', name: '공장지대', startWave: 10 },
-  { id: 'sewer', name: '하수도', startWave: 15 },
+  // 고속도로 — 버려진 차량/연료통이 즐비. 화염 무기가 인화물을 잘 터뜨린다.
+  { id: 'highway', name: '고속도로 잔해', startWave: 5, combatBonus: { FIRE: 1.25 } },
+  // 공장지대 — 노출된 배선/금속 골조. 감전이 잘 먹힌다.
+  { id: 'factory', name: '공장지대', startWave: 10, combatBonus: { SHOCK: 1.3 } },
+  // 하수도 — 고인 오수. 독이 퍼지기 좋다.
+  { id: 'sewer', name: '하수도', startWave: 15, combatBonus: { TOXIC: 1.3 } },
   // 심층 지역 — wave 20+. 깊이질수록 희귀 재료 비중↑(REGION_DROP_MULT 참고).
   { id: 'bunker', name: '지하 벙커', startWave: 20 },
-  { id: 'hospital', name: '폐병원 안뜰', startWave: 25 },
-  { id: 'powerplant', name: '손상된 발전소', startWave: 30 },
-  { id: 'swamp', name: '독성 늪 외곽', startWave: 35 },
-  { id: 'landfill', name: '매립지 분화구', startWave: 40 },
+  // 폐병원 — 약품/체액 잔류. 독성 강화.
+  { id: 'hospital', name: '폐병원 안뜰', startWave: 25, combatBonus: { TOXIC: 1.28 } },
+  // 손상된 발전소 — 누전·고압. 감전 최고 효율.
+  { id: 'powerplant', name: '손상된 발전소', startWave: 30, combatBonus: { SHOCK: 1.45 } },
+  // 독성 늪 — 전역 오염. 독 최고 효율.
+  { id: 'swamp', name: '독성 늪 외곽', startWave: 35, combatBonus: { TOXIC: 1.4 } },
+  // 매립지 — 메탄/인화성 폐기물. 화염 강화.
+  { id: 'landfill', name: '매립지 분화구', startWave: 40, combatBonus: { FIRE: 1.35 } },
   { id: 'checkpoint', name: '격리 검문소 폐허', startWave: 45 }
 ];
 
@@ -24,6 +36,14 @@ export const REGION_BY_ID = REGIONS.reduce((m, r) => {
   m[r.id] = r;
   return m;
 }, {});
+
+// 지역×무기속성 전투 배율. 매칭 없으면 1.0(보너스 없는 지역/속성). 핫패스에서 호출되니 가볍게.
+//   regionId — getRegion(...).id   attrTag — 무기/DoT 속성('FIRE'|'TOXIC'|'SHOCK'|...).
+export function getRegionCombatBonus(regionId, attrTag) {
+  if (!attrTag) return 1;
+  const b = REGION_BY_ID[regionId]?.combatBonus;
+  return (b && b[attrTag]) || 1;
+}
 
 // waveIndex → 지역 객체. startWave 내림차순으로 첫 충족 구간을 고른다(상태 저장 없음).
 // 핫패스 아님(웨이브 전환·처치당 1회) — 단순 선형 탐색으로 충분.

@@ -477,6 +477,15 @@ export default class HubScene extends Phaser.Scene {
       .setOrigin(0, 0);
     list.add(accentBar);
 
+    // 합성 힌트 글로우 테두리 — 지금 제작 가능(금색 pulse)/1개 부족(반투명) 강조용.
+    // 기본 숨김. refreshCraft가 _setRowGlow로 모드 전환. stroke만 쓰는 외곽선(fill 알파 0~약).
+    const glow = this.add
+      .rectangle(CONTENT.x + 1, top + 1, CONTENT.w - 2, rowH - 2, 0xf0c040, 0)
+      .setOrigin(0, 0)
+      .setStrokeStyle(2, 0xf0c040, 0)
+      .setVisible(false);
+    list.add(glow);
+
     // 행 하단 1px 구분선(칸 경계) — 셀 배경과 함께 뒤쪽 z, 스크롤 동행.
     list.add(
       this.add.rectangle(CONTENT.x, cy + rowH / 2, CONTENT.w, 1, 0x000000, 0.4).setOrigin(0, 0.5)
@@ -526,7 +535,8 @@ export default class HubScene extends Phaser.Scene {
     list.add(stateLbl);
 
     // btnBgs 빈 배열 — 행에서 버튼을 팝업으로 옮겨 스크롤 컬링 대상이 없다(setScroll 무해 통과).
-    return { id, recipe, cellBg, accentBar, abilityTxt, stateLbl, btnBgs: [], cy };
+    // _glowMode: _setRowGlow 멱등 가드(같은 모드 재호출 시 tween 재시작 방지). 초기 undefined=강제 적용.
+    return { id, recipe, cellBg, accentBar, glow, abilityTxt, stateLbl, btnBgs: [], cy, _glowMode: undefined };
   }
 
   // ── 공용 세로 스크롤 (합성·영구 강화 탭 공유) ─────────────────────────
@@ -646,6 +656,12 @@ export default class HubScene extends Phaser.Scene {
 
   // 스크롤 입력/마스크 정리 — 탭 전환·재진입·씬 종료 시. 미설정 상태에서 호출해도 안전.
   teardownScroll() {
+    // 합성 행 글로우 pulse tween 정리 — contentLayer.removeAll(true) 직전에 호출되므로
+    // 파기 전에 killTweensOf로 끊어 destroyed 타깃 tween 잔존(누수)을 0으로 만든다.
+    if (this.weaponRows) {
+      for (const row of this.weaponRows) if (row.glow) this.tweens.killTweensOf(row.glow);
+      this.weaponRows = null;
+    }
     if (this._scrollInput) {
       this.input.off('wheel', this._scrollInput.onWheel);
       this.input.off('pointerdown', this._scrollInput.onDown);
@@ -668,19 +684,41 @@ export default class HubScene extends Phaser.Scene {
     this.equipAbility.setText(`장착 중 · ${eq.ability}`);
 
     // 슬림 행 — 셀 배경 톤 + accent 바 + 상태 라벨. 상세(스탯/재료/버튼/별점)는 팝업이 담당.
-    this.weaponRows.forEach(({ id, recipe, cellBg, accentBar, stateLbl }) => {
+    this.weaponRows.forEach((row) => {
+      const { id, recipe, cellBg, accentBar, stateLbl } = row;
       const owned = GameState.ownedWeapons.has(id);
       const equipped = GameState.equippedWeapon === id;
       const level = GameState.weaponLevels[id] || 0;
 
-      // 미보유 무기의 "지금 제작 가능" 판정 — 선행 무기 보유 + 재료 충분(first_forge 할인 반영).
+      // 미보유 무기의 제작 상태 판정 — 'ready'(지금 제작 가능) / 'near'(1종·총 2개 이하만 부족) / 'off'.
+      // 선행 무기 보유 + first_forge 할인 반영 비용을 단일 출처(effectiveCraftCost)로 본다.
       let craftable = false;
+      let glowMode = 'off';
       if (!owned) {
         const prereqOk = !recipe.requires || GameState.ownedWeapons.has(recipe.requires);
-        const base =
-          Object.keys(recipe.cost || {}).length > 0 ? recipe.cost : ENHANCE_BASE_COST[id] || {};
-        craftable = prereqOk && GameState.canAfford(GameState.effectiveCraftCost(base));
+        if (prereqOk) {
+          const base =
+            Object.keys(recipe.cost || {}).length > 0 ? recipe.cost : ENHANCE_BASE_COST[id] || {};
+          const eff = GameState.effectiveCraftCost(base);
+          if (GameState.canAfford(eff)) {
+            craftable = true;
+            glowMode = 'ready';
+          } else {
+            // "거의 다 됐다" — 부족한 재료 종이 1개이고 총 부족 수량이 2개 이하일 때만 near.
+            let missingKinds = 0;
+            let totalDeficit = 0;
+            for (const k of Object.keys(eff)) {
+              const d = (eff[k] || 0) - (GameState.materials[k] || 0);
+              if (d > 0) {
+                missingKinds++;
+                totalDeficit += d;
+              }
+            }
+            if (missingKinds === 1 && totalDeficit <= 2) glowMode = 'near';
+          }
+        }
       }
+      this._setRowGlow(row, glowMode);
 
       // 셀 배경 톤 + 좌측 accent 바 — 장착중(금)/제작가능(청록 강조)/보유/미보유.
       if (equipped) {
@@ -706,6 +744,35 @@ export default class HubScene extends Phaser.Scene {
 
     // 모달이 열려 있으면 함께 갱신(강화/장착 후 즉시 반영).
     if (this._modalWeaponId) this.refreshWeaponModal(this._modalWeaponId);
+  }
+
+  // 합성 힌트 글로우 모드 적용(멱등) — 'ready'(금색 pulse) / 'near'(반투명 정적) / 'off'.
+  // 같은 모드면 no-op(매 refreshCraft마다 tween 재시작 방지). 탭 벗어날 때 teardownScroll가 tween 정리.
+  _setRowGlow(row, mode) {
+    if (row._glowMode === mode) return;
+    row._glowMode = mode;
+    const g = row.glow;
+    if (!g) return;
+    this.tweens.killTweensOf(g);
+    if (mode === 'ready') {
+      // 지금 제작 가능 — 금색 테두리. motionOk면 alpha를 부드럽게 맥동(fill 0이라 외곽선만 숨쉼).
+      g.setFillStyle(0xf0c040, 0).setStrokeStyle(2, 0xf0c040, 0.95).setVisible(true).setAlpha(1);
+      if (this.motionOk) {
+        this.tweens.add({
+          targets: g,
+          alpha: 0.4,
+          duration: 620,
+          ease: 'Sine.inOut',
+          yoyo: true,
+          repeat: -1
+        });
+      }
+    } else if (mode === 'near') {
+      // 1개만 부족 — "거의 다 됐다". 옅은 금색 외곽선 + 아주 옅은 fill, 정적(맥동 없음).
+      g.setFillStyle(0xf0c040, 0.06).setStrokeStyle(1.5, 0xf0c040, 0.45).setVisible(true).setAlpha(0.6);
+    } else {
+      g.setVisible(false).setAlpha(1);
+    }
   }
 
   // ── 무기 상세 팝업 (합성 탭 전용, 1회 생성·재사용) ──────────────────────

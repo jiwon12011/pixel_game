@@ -106,15 +106,15 @@ export default class SettingsScene extends Phaser.Scene {
     this.label(inner, 20, 126, 'BGM 볼륨', C.gray, '13px');
     mw.bgmBar = this.add.graphics();
     inner.add(mw.bgmBar);
-    mw.bgmMinus = this.makeButton(35, 150, 30, 26, () => this.stepVolume('bgm', -1), inner);
-    mw.bgmPlus = this.makeButton(265, 150, 30, 26, () => this.stepVolume('bgm', +1), inner);
+    mw.bgmMinus = this.makeButton(35, 150, 32, 28, () => this.stepVolume('bgm', -1), inner);
+    mw.bgmPlus = this.makeButton(265, 150, 32, 28, () => this.stepVolume('bgm', +1), inner);
 
     // SFX 볼륨
     this.label(inner, 20, 192, 'SFX 볼륨', C.gray, '13px');
     mw.sfxBar = this.add.graphics();
     inner.add(mw.sfxBar);
-    mw.sfxMinus = this.makeButton(35, 216, 30, 26, () => this.stepVolume('sfx', -1), inner);
-    mw.sfxPlus = this.makeButton(265, 216, 30, 26, () => this.stepVolume('sfx', +1), inner);
+    mw.sfxMinus = this.makeButton(35, 216, 32, 28, () => this.stepVolume('sfx', -1), inner);
+    mw.sfxPlus = this.makeButton(265, 216, 32, 28, () => this.stepVolume('sfx', +1), inner);
 
     // 모션 줄이기 토글
     this.label(inner, 20, 258, '모션 줄이기', C.body);
@@ -132,7 +132,8 @@ export default class SettingsScene extends Phaser.Scene {
     mw.runBtn = this.makeButton(HALF_W, 318, 260, 28, () => this.onRunReset(), inner);
     mw.wipeBtn = this.makeButton(HALF_W, 354, 260, 28, () => this.onWipeAll(), inner);
 
-    const closeBtn = this.makeButton(HALF_W, 386, 260, 22, () => this.close(), inner);
+    // 닫기 — 터치타겟 일관성(22→30px). 패널 하단(PH 404) 안에서 wipe 버튼과 3px 간격 유지.
+    const closeBtn = this.makeButton(HALF_W, 384, 260, 30, () => this.close(), inner);
     closeBtn.set(true, '닫기', 0x3d2b1a, C.gold);
 
     this.refresh();

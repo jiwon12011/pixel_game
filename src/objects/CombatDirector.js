@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import Enemy from './Enemy.js';
 import { LOGICAL } from '../constants/layout.js';
-import { PLAYER, SPAWN, SPAWN_WEIGHTS, waveParams } from '../constants/combat.js';
+import { PLAYER, SPAWN, SPAWN_WEIGHTS, ENEMY_TYPES, ELITE, waveParams } from '../constants/combat.js';
 
 // 전투 운영자 — 자동 진행 사이드스크롤 전투의 두뇌.
 //   · 웨이브 스폰(우측 밖 → 좌측 접근)
@@ -32,8 +32,16 @@ export default class CombatDirector {
     this.player = cfg.player;
     // 현재 웨이브 파라미터 공급원(스폰 간격/동시상한/HP·드롭 배율). 없으면 웨이브0 고정.
     this.getWaveParams = cfg.getWaveParams || (() => waveParams(0));
+    // 현재 웨이브 번호 공급원(엘리트 등장 임계 판정). 없으면 0 고정.
+    this.getWaveIndex = cfg.getWaveIndex || (() => 0);
     // DoT 1틱 콜백(enemy, dmg) — 데미지숫자/처치 처리는 scene이 소유. 없으면 무시.
     this.onDotTick = cfg.onDotTick || null;
+    // 위험 적 스폰 콜백(enemy, {elite, grab}) — 엘리트/그래버 등장 경고는 scene이 표시(throttle도 scene 책임).
+    this.onThreatSpawn = cfg.onThreatSpawn || null;
+
+    // [seam B] 근접 타격 ctx — 매 접촉마다 객체 생성하지 않게 1회만 만든다(부작용은 player 콜백 경유).
+    // grab 등 onContact 행동이 ctx.bindPlayer(ms, x)로 scene 상태를 건드린다.
+    this._contactCtx = { bindPlayer: (ms, x) => this.player.bindPlayer?.(ms, x) };
 
     this.enemies = [];
     this.running = false;
@@ -73,6 +81,7 @@ export default class CombatDirector {
       motionOk: this.motionOk,
       onDeath
     });
+    boss.director = this; // ctx 배선 — 행동 패턴이 director를 참조할 수 있게(scene 부작용은 콜백 주입)
     this.enemies.push(boss);
     return boss;
   }
@@ -99,20 +108,46 @@ export default class CombatDirector {
 
   spawn() {
     const typeKey = this.pickSpawnType();
+    // 엘리트 승격 — minWave 이상에서 낮은 확률. native behavior는 유지하고 HP/스케일/tint만 강화.
+    const elite = this.getWaveIndex() >= ELITE.minWave && Math.random() < ELITE.chance;
     const enemy = new Enemy(this.scene, {
       typeKey,
+      elite,
       x: LOGICAL.width + SPAWN.offRightX,
       groundY: this.groundY,
       depth: this.depth,
       motionOk: this.motionOk,
-      hpMult: this.getWaveParams().hpMult, // 웨이브가 깊을수록 더 단단하게
+      // 웨이브 hpMult에 엘리트 배율을 곱연산(엘리트는 확연히 단단하게).
+      hpMult: this.getWaveParams().hpMult * (elite ? ELITE.hpMult : 1),
       onDeath: () => {
         // 사망 → 다음 스폰을 살짝 앞당겨 텀이 비지 않게
         this.nextSpawnIn = Math.min(this.nextSpawnIn, SPAWN.respawnDelay);
         this.spawnAccum = 0;
       }
     });
+    enemy.director = this; // ctx 배선 — 행동 패턴이 director 참조 가능(seam D 등)
     this.enemies.push(enemy);
+
+    // 위험 패턴 등장 경고 — 엘리트(승격) 또는 그래버(속박형). 표시/쿨다운은 scene이 판단.
+    const isGrab = ENEMY_TYPES[typeKey]?.behavior?.type === 'grab';
+    if ((elite || isGrab) && this.onThreatSpawn) this.onThreatSpawn(enemy, { elite, grab: isGrab });
+  }
+
+  // 보스 페이즈 소환용 — 지정 타입 1체를 즉시 스폰(suppressSpawn 무시). alive 캡은 호출부가 책임.
+  // 텍스처는 인카운터 시작 시 로드된 SLICE_SPAWN_LIST에 있어야 한다(미로드 타입 호출 금지).
+  spawnAdd(typeKey) {
+    if (!ENEMY_TYPES[typeKey] || !this.scene.textures.exists(typeKey)) return null;
+    const enemy = new Enemy(this.scene, {
+      typeKey,
+      x: LOGICAL.width + SPAWN.offRightX,
+      groundY: this.groundY,
+      depth: this.depth,
+      motionOk: this.motionOk,
+      hpMult: this.getWaveParams().hpMult
+    });
+    enemy.director = this;
+    this.enemies.push(enemy);
+    return enemy;
   }
 
   scheduleNextSpawn() {
@@ -145,6 +180,8 @@ export default class CombatDirector {
           e.attackTimer = e.getAttackCooldown(); // 감전 시 쿨다운 늘어남
           e.lungeAttack();
           this.player.takeDamage(e.def.damage);
+          // [seam B] 근접 타격 성립 — grab(속박) 등 onContact 행동 발동(부작용은 ctx 콜백 경유).
+          e.behavior?.onContact?.(e, this._contactCtx);
         }
       }
       // DoT — 만료 우선 해제, 아니면 누적 주기마다 1틱. 틱 데미지는 적기억 tally/내성 제외.
@@ -159,8 +196,9 @@ export default class CombatDirector {
     }
 
     // 주인공 자동 공격 — 사거리 내 가장 가까운 적. 쿨다운은 장착 무기가 결정.
+    // 속박(grab) 중이면 쿨다운은 흘려보내되 타격은 skip — 풀리는 즉시 다시 때린다.
     this.playerAtkCd -= dtMs;
-    if (this.playerAtkCd <= 0) {
+    if (this.playerAtkCd <= 0 && !this.player.isBound?.()) {
       const target = this.nearestInRange(px, PLAYER.attackRange);
       if (target) {
         this.playerAtkCd = this.player.getAttackCooldown();

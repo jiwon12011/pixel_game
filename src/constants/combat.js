@@ -1,16 +1,29 @@
 // 전투 밸런싱 상수 — 한 곳에서 스폰/HP/데미지/속도를 튜닝(밸런싱 쉽게).
 // 거리/속도 단위는 논리 픽셀(layout.js LOGICAL 기준). 속도는 px/sec.
 
-// 세로 슬라이스 스폰 적 — 일반 2종 + 화염내성(tank) + 독내성(putrifier) 4종.
-export const SLICE_SPAWN_LIST = ['sludge_zombie', 'flanker_zombie', 'tank_mutant', 'putrifier'];
+// 세로 슬라이스 스폰 적 — 일반 2종 + 속박(grabber) + 화염내성(tank) + 독내성(putrifier) 5종.
+export const SLICE_SPAWN_LIST = ['sludge_zombie', 'flanker_zombie', 'grabber', 'tank_mutant', 'putrifier'];
 
-// 스폰 가중치 — 균등 대신 이 비율로 뽑아 tank를 희소화(CombatDirector.pickSpawnType).
+// 스폰 가중치 — 균등 대신 이 비율로 뽑아 tank/grabber를 희소화(CombatDirector.pickSpawnType).
 // spawnList에 있지만 여기 없는 타입은 1로 간주.
 export const SPAWN_WEIGHTS = {
   sludge_zombie: 3,
   flanker_zombie: 3,
   putrifier: 2,
+  grabber: 2,
   tank_mutant: 1
+};
+
+// ── 엘리트 적 (Phase 2) ────────────────────────────────────────────────
+// 일반 스폰에서 낮은 확률로 "엘리트"를 주입한다 — 별도 클래스 없이 Enemy에 elite 플래그만.
+// HP 대폭↑ + 구분 tint(amber) + 살짝 큰 스케일 + 처치 코인 보너스. behavior는 적 native 유지.
+export const ELITE = {
+  minWave: 4,      // 이 웨이브부터 엘리트 등장(초반 난이도 보호)
+  chance: 0.1,     // 일반 스폰당 엘리트 승격 확률
+  hpMult: 2.2,     // 엘리트 추가 HP 배율(웨이브 hpMult에 곱연산)
+  scale: 1.18,     // 스프라이트/표시높이 배율(작은 화면에서 한눈에 큰 적)
+  coinMult: 1.5,   // 처치 코인 배율
+  coinBonus: 10    // 처치 코인 가산(배율 후)
 };
 
 // 주인공 — 능력치(maxHP/atk/def)와 장착 무기(공격력/쿨다운/메카닉)는 이제
@@ -50,7 +63,9 @@ export const ENEMY_TYPES = {
     damage: 8,
     attackCooldown: 1000,
     displayHeight: 122,
-    contactRange: 74
+    contactRange: 74,
+    // 사망폭발 — 죽을 때 가까이(<90px) 있으면 점액 파열로 피해(takePlayerDamage가 방어력 감산 처리).
+    behavior: { type: 'explode', blastR: 90, blastDmg: 14 }
   },
   flanker_zombie: {
     maxHP: 38,
@@ -58,7 +73,9 @@ export const ENEMY_TYPES = {
     damage: 6,
     attackCooldown: 820,
     displayHeight: 108,
-    contactRange: 66
+    contactRange: 66,
+    // 측면포위 — 접촉 직전(66~150px)에서 단독 대시로 파고든다. lungeAttack inRange와 안 겹치게 하한=contactRange.
+    behavior: { type: 'flank', dashRange: 150, dashMult: 2.2 }
   },
   grabber: {
     maxHP: 72,
@@ -66,7 +83,9 @@ export const ENEMY_TYPES = {
     damage: 11,
     attackCooldown: 1150,
     displayHeight: 132,
-    contactRange: 80
+    contactRange: 80,
+    // 속박 — 근접 타격이 닿으면 bindMs 동안 플레이어 자동공격 봉쇄(seam B). 느리고 단단해 압박형.
+    behavior: { type: 'grab', bindMs: 700 }
   },
   // 탱크 뮤턴트 — 느리고 단단한 화염내성 학습체(FIRE 채널). 스폰 가중치 최소.
   tank_mutant: {
@@ -75,16 +94,21 @@ export const ENEMY_TYPES = {
     damage: 14,
     attackCooldown: 1400,
     displayHeight: 145,
-    contactRange: 85
+    contactRange: 85,
+    // 정면방어 — 관통 외 피해를 0.6배로 경감(상시, guard tint로 시각화). 화염내성과 별개의 물리 경감.
+    behavior: { type: 'guard', reduce: 0.6 }
   },
   // 부패체 — 독내성 학습체(TOXIC 채널). 빠른 편, 무리지어 전파 시너지.
+  // 사망 시 독웅덩이를 남긴다(poolOnDeath) — 멜리에서 잡으면 발밑에 지속 피해 존이 깔리므로
+  // "접근 전에 처치"가 정답이 되는 압박형. 존 시스템은 scene이 소유(draw-once + 동시 3개 캡).
   putrifier: {
     maxHP: 90,
     speed: 28,
     damage: 10,
     attackCooldown: 950,
     displayHeight: 128,
-    contactRange: 78
+    contactRange: 78,
+    behavior: { type: 'poolOnDeath', radius: 80, dmg: 5, durationMs: 3500 }
   }
 };
 
@@ -139,6 +163,9 @@ export const BOSS_TYPES = {
     displayHeight: 232, // 일반 적의 ~1.7배 — 화면을 채우는 실루엣
     contactRange: 118,
     name: '콜로서스',
+    // 페이즈 — HP가 임계 아래로 떨어지면 1회씩 발동(updateBossHpBar의 _phaseIdx 가드).
+    // 0.66: 방어 자세(guard) + 가속. 0.5 분노(_enrageBoss)와 공존(분노가 더 깊은 임계).
+    phases: [{ atRatio: 0.66, action: 'guardUp' }],
     reward: { coins: 140, materials: { scrap_metal_plate: 3, old_battery_cell: 2, broken_circuit_board: 1 } }
   },
   // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 12, 회차 1).
@@ -150,6 +177,8 @@ export const BOSS_TYPES = {
     displayHeight: 216,
     contactRange: 110,
     name: '헤럴드',
+    // 페이즈 — 0.66에서 일반 좀비 소환(스태거, 보스 포함 alive≤5 캡). 0.5 분노와 공존.
+    phases: [{ atRatio: 0.66, action: 'summonAdds' }],
     reward: { coins: 160, materials: { chemical_vial: 2, broken_circuit_board: 2, old_battery_cell: 2 } }
   }
 };
@@ -218,6 +247,9 @@ export const COMBAT_COLORS = {
   hitTint: 0xff0000, // 피격 틴트
   danger: 0xff2a2a, // 위험 비네트 펄스
   shock: 0x66ddff, // 감전된 적 청록빛 틴트
+  guard: 0x7d97c4, // 정면방어 적 강철빛 틴트 (감전 청록·DoT 색과 구분되는 푸른 금속톤)
+  elite: 0xffb030, // 엘리트 적 구분 틴트 (앰버 골드 — guard 푸른톤·shock 청록과 확실히 분리)
+  hazard: 0x33ff77, // 독웅덩이 존 색 (toxicGlow와 동일 형광 녹 — 청록 펄스로 읽힘)
   scrap: 0x8a6a3a,  // 스크랩 칩/토스트 배경(녹슨 철, 가독성 보정)
   burnGlow: 0xff5500,  // 화상 DoT tint 목표색 (주황-적) — setDotTint 보간 종점
   toxicGlow: 0x33ff77  // 독 DoT tint 목표색 (형광 녹) — setDotTint 보간 종점

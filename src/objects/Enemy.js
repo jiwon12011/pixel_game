@@ -1,4 +1,5 @@
-import { ENEMY_TYPES, COMBAT_COLORS, MOTION } from '../constants/combat.js';
+import { ENEMY_TYPES, COMBAT_COLORS, MOTION, ELITE } from '../constants/combat.js';
+import { ENEMY_BEHAVIORS } from '../constants/enemyBehaviors.js';
 
 // 적 1마리 = 스프라이트 + 그림자 + 머리 위 HP바를 묶은 Container.
 // 이동/피격/사망을 자체 메서드로 캡슐화하고, motion-engineer가 얹을 훅을
@@ -11,12 +12,14 @@ export default class Enemy {
    * @param {Phaser.Scene} scene
    * @param {object} cfg { typeKey, x, groundY, depth, motionOk, onDeath }
    */
-  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath, hpMult = 1, def = null, maxHP = null, isBoss = false }) {
+  constructor(scene, { typeKey, x, groundY, depth, motionOk, onDeath, hpMult = 1, def = null, maxHP = null, isBoss = false, elite = false }) {
     this.scene = scene;
     this.typeKey = typeKey;
     // 보스는 ENEMY_TYPES에 없으므로 cfg.def로 스탯을 주입받는다(잡몹은 룩업 그대로).
     this.def = def || ENEMY_TYPES[typeKey];
     this.isBoss = isBoss;
+    // 엘리트 — 별도 클래스 없이 플래그만. 스케일↑/구분 tint/HP↑(hpMult는 director가 이미 곱함).
+    this.isElite = elite;
     this.motionOk = motionOk;
     this.onDeath = onDeath;
 
@@ -25,6 +28,12 @@ export default class Enemy {
     this.maxHP = maxHP != null ? maxHP : Math.max(1, Math.round(this.def.maxHP * hpMult));
     this.hp = this.maxHP;
     this.speed = this.def.speed;
+
+    // 행동 패턴(데이터 주도) — def.behavior.type로 테이블 룩업. 없으면 null=현행 직진/피격(비파괴적).
+    // 훅(move/onDamage/onDeath)은 seam에서 옵셔널 체이닝으로만 호출 → 미선언 행동은 자동으로 기본 동작.
+    this.behavior = ENEMY_BEHAVIORS[this.def.behavior?.type] || null;
+    this.guarding = this.def.behavior?.type === 'guard'; // 정면방어 — 상시(restoreTint 우선순위 chain에서 tint)
+    this.director = null; // CombatDirector.spawn/spawnBoss가 주입(ctx 배선용)
 
     this.dead = false; // HP 0 → 사망 연출 진행 중
     this.removed = false; // 연출 끝 → 풀에서 제거 대상
@@ -67,10 +76,12 @@ export default class Enemy {
     this._dotTintSteps = null;   // 사전계산 보간색 배열(onUpdate에서 Math 연산 없이 룩업)
     this._dotStepIdx = -1;       // 마지막 적용 색 인덱스 — 동일 인덱스면 setTint 생략. -1=강제 재적용
 
+    // 엘리트는 살짝 큰 실루엣 — 스케일·표시높이를 함께 키워 HP바/VFX 앵커가 같이 따라간다.
+    const eliteScale = elite ? ELITE.scale : 1;
     const src = scene.textures.get(typeKey).getSourceImage();
-    const scale = this.def.displayHeight / src.height;
+    const scale = (this.def.displayHeight / src.height) * eliteScale;
     this.baseScale = scale;
-    this.displayHeight = this.def.displayHeight;
+    this.displayHeight = this.def.displayHeight * eliteScale;
 
     this.container = scene.add.container(x, groundY).setDepth(depth);
 
@@ -85,9 +96,9 @@ export default class Enemy {
       .setOrigin(0.5, 1)
       .setScale(scale);
 
-    // 머리 위 작은 HP바
-    this.barW = this.def.displayHeight * 0.46;
-    const barY = -this.def.displayHeight - 6;
+    // 머리 위 작은 HP바 — 엘리트로 커진 displayHeight를 따라가 스프라이트 위에 정확히 안착.
+    this.barW = this.displayHeight * 0.46;
+    const barY = -this.displayHeight - 6;
     this.hpBg = scene.add
       .rectangle(0, barY, this.barW + 2, 5, 0x000000, 0.65)
       .setOrigin(0.5);
@@ -95,13 +106,26 @@ export default class Enemy {
       .rectangle(-this.barW / 2, barY, this.barW, 3, COMBAT_COLORS.toxic)
       .setOrigin(0, 0.5);
 
-    this.container.add([this.shadow, this.sprite, this.hpBg, this.hpFill]);
+    // 상태 표식 핍 — HP바 우측에 작은 4px 색점(감전 청록·독 녹·화염 주황). tint만으론
+    // 작은 화면(360×640)에서 잘 안 읽혀 보완. 상태가 바뀔 때만 _updateStatusPip로 갱신(매 프레임 X).
+    // 검은 외곽선으로 밝은 배경에서도 또렷. 항상 렌더(모션 아님) — reduced-motion에도 노출.
+    this.statusPip = scene.add
+      .rectangle(this.barW / 2 + 5, barY, 4, 4, 0xffffff, 1)
+      .setOrigin(0.5)
+      .setStrokeStyle(1, 0x000000, 0.6)
+      .setVisible(false);
+
+    this.container.add([this.shadow, this.sprite, this.hpBg, this.hpFill, this.statusPip]);
 
     // 보스는 머리 위 작은 HP바를 숨긴다 — 화면 상단의 큰 보스 HP바(scene)가 대신한다.
     if (isBoss) {
       this.hpBg.setVisible(false);
       this.hpFill.setVisible(false);
+      this.statusPip.setVisible(false);
     }
+
+    // 정면방어 적 / 엘리트 — 등장 시점부터 구분 tint를 깔아 즉시 읽히게(상시 상태).
+    if (this.guarding || this.isElite) this.restoreTint();
 
     // ── 스폰 페이드인 ─────────────────────────────────────────────────
     if (motionOk) {
@@ -136,12 +160,15 @@ export default class Enemy {
     // 감전 만료 체크
     if (this.shocked && this.scene.time.now >= this.shockUntil) this.clearShock();
 
+    // [seam A] 이동 — 행동 패턴이 move 훅을 가지면 직진을 대체(flank 대시 등). 없으면 기본 직진.
     const dist = this.worldX - playerX;
-    if (dist > this.def.contactRange) {
-      this.worldX -= this.speed * this.speedMult * dt; // 감전 시 speedMult로 감속
-      this.inRange = false;
-    } else {
-      this.inRange = true; // 사거리 진입 → director가 근접 공격 처리
+    if (!this.behavior?.move?.(this, dt, playerX, dist)) {
+      if (dist > this.def.contactRange) {
+        this.worldX -= this.speed * this.speedMult * dt; // 감전 시 speedMult로 감속
+        this.inRange = false;
+      } else {
+        this.inRange = true; // 사거리 진입 → director가 근접 공격 처리
+      }
     }
     // 피격 셰이크/플래시 — 상태기반 진행(TimerEvent 0). 매 프레임 cheap한 분기뿐.
     if (this.shakeActive || this.flashActive) {
@@ -191,6 +218,7 @@ export default class Enemy {
     this.shockUntil = this.scene.time.now + durationMs;
     this.shocked = true;
     this.restoreTint();
+    this._updateStatusPip();
   }
 
   clearShock() {
@@ -198,6 +226,7 @@ export default class Enemy {
     this.speedMult = 1;
     this.shockCdMult = 1;
     this.restoreTint();
+    this._updateStatusPip();
   }
 
   // [메카닉] 화염 DoT — 상태 필드만 세팅(타이머 X). 갱신(refresh) 가능.
@@ -220,6 +249,7 @@ export default class Enemy {
     this.dotExpiresAt = now + durationMs;
     this.dotNoSpread = noSpread;
     this.setDotTint();
+    this._updateStatusPip();
   }
 
   clearDot() {
@@ -228,6 +258,7 @@ export default class Enemy {
     this._dotPulseTween?.stop(); // 맥동 트윈 정리 — dotType=null 후에 stop해야 onUpdate 가드 불필요
     this._dotPulseTween = null;
     this.restoreTint();
+    this._updateStatusPip();
   }
 
   // [모션 훅] DoT tint 맥동 — 화상: 주황-적(0xff5500), 독: 형광녹(0x33ff77).
@@ -288,6 +319,21 @@ export default class Enemy {
     });
   }
 
+  // 상태 표식 핍 갱신 — 상태 변경점(applyShock/clearShock/_applyDot/clearDot/die)에서만 호출.
+  // 색 우선순위는 tint와 동일(감전 > 독 > 화염)로 시각 일관. 활성 상태 없으면 숨김.
+  _updateStatusPip() {
+    if (this.isBoss || !this.statusPip) return;
+    let color = null;
+    if (this.shocked) color = COMBAT_COLORS.shock;
+    else if (this.dotType === 'toxic') color = COMBAT_COLORS.toxicGlow;
+    else if (this.dotType === 'burn') color = COMBAT_COLORS.burnGlow;
+    if (color == null) {
+      this.statusPip.setVisible(false);
+      return;
+    }
+    this.statusPip.setFillStyle(color, 1).setVisible(true);
+  }
+
   // 현재 상태에 맞는 기본 tint 복원 — 우선순위: 감전 > DoT 맥동 > 클리어.
   // flashHit 종료(155ms) / clearShock / clearDot 모두 이 경로를 통한다.
   restoreTint() {
@@ -305,6 +351,12 @@ export default class Enemy {
         const c = this.dotType === 'burn' ? COMBAT_COLORS.burnGlow : COMBAT_COLORS.toxicGlow;
         this.sprite.setTint(c);
       }
+    } else if (this.guarding) {
+      // 정면방어: 강철빛 tint — 감전·DoT 다음 우선순위(상태 없을 때 상시 노출).
+      this.sprite.setTint(COMBAT_COLORS.guard);
+    } else if (this.isElite) {
+      // 엘리트: 앰버 골드 tint — guard보다 낮은 우선순위(엘리트 guard면 guard색이 이김). 평상시 노출.
+      this.sprite.setTint(COMBAT_COLORS.elite);
     } else {
       this.sprite.clearTint();
     }
@@ -389,6 +441,7 @@ export default class Enemy {
     this._dotPulseTween = null;
     this.hpBg.setVisible(false);
     this.hpFill.setVisible(false);
+    this.statusPip.setVisible(false);
     this.sprite.clearTint();
     this.bobTween?.stop();  // bob 정지 (container.y는 이후 트윈이 소유)
     this.onDeath?.(this);

@@ -33,6 +33,14 @@ export const DROP_TABLES = {
     { res: 'broken_circuit_board', min: 1, max: 1, chance: 0.4 },
     { res: 'old_battery_cell', min: 1, max: 1, chance: 0.2 }
   ],
+  // 그래버 — 느리고 단단한 속박형(PHYSICAL). 보상은 잡몹 상위 톤(나사/구리선 후함 + 배터리 가끔).
+  grabber: [
+    { res: 'coins', min: 6, max: 10, chance: 1 },
+    { res: 'rusty_screws', min: 1, max: 2, chance: 0.8 },
+    { res: 'copper_wire_coil', min: 1, max: 1, chance: 0.5 },
+    { res: 'scrap_metal_plate', min: 1, max: 1, chance: 0.35 },
+    { res: 'old_battery_cell', min: 1, max: 1, chance: 0.18 }
+  ],
   // 부패체 — 화학 약품병 주력 공급원(투척 트리 재료).
   putrifier: [
     { res: 'coins', min: 5, max: 9, chance: 1 },

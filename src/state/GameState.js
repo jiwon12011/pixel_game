@@ -78,6 +78,9 @@ function baseRun() {
     weaponLevels: {},
     waveIndex: 0,
     runKills: 0,
+    // 무피해 클리어 보너스(CLEAN SWEEP) — 이번 웨이브 중 피격 여부. 피격 시 true,
+    // 웨이브 클리어 판정 후 false로 리셋. 영속 불필요(런 한정 ephemeral, saveRun에서 제외).
+    waveHitFlag: false,
     runBossKills: 0, // 이번 런 보스 처치 수(런 한정) — deriveStage powerScore bossBonus 신호.
     runAttrKills: freshAttrKills(), // 속성별 처치 누적 — 사망 요약 "주력 속성"
     lastCraftedWeapon: null, // 이번 런에 마지막으로 제작한 무기(사망 요약용)

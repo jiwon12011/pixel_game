@@ -22,17 +22,19 @@ import {
   MOTION,
   WAVE,
   DROP,
+  ELITE,
   WEAPON_HAND,
   waveParams,
   ENEMY_MEMORY_MAP,
   bossStatsForWave,
   isBossWave
 } from '../constants/combat.js';
+import { ENEMY_BEHAVIORS } from '../constants/enemyBehaviors.js';
 import { PIXEL_FONT, BODY_FONT, installCrispText } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
 import GameState from '../state/GameState.js';
 import { rollDrop } from '../constants/drops.js';
-import { getRegion } from '../constants/regions.js';
+import { getRegion, getRegionCombatBonus } from '../constants/regions.js';
 import { WEAPON_RECIPES, STAT_UPGRADES, defenseMultiplier } from '../constants/crafting.js';
 import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 import { legacyOptions } from '../constants/meta.js';
@@ -55,6 +57,19 @@ const toHexStr = (n) => '#' + n.toString(16).padStart(6, '0');
 // 데미지 숫자 풀 상한 — 동시에 24개를 넘으면 새 숫자는 생략(밀집 전투에서도 그 정도면 시각적으로 충분).
 const DMG_POOL_MAX = 24;
 
+// ── 독웅덩이(hazard pool) 상수 (Phase 2) ────────────────────────────────
+// 동시 존 상한 3개(초과 시 가장 오래된 것 회수). 틱 주기는 scene.time.now 비교(per-zone 타이머 0).
+const HAZARD_MAX = 3;
+const HAZARD_TICK_MS = 700;   // 존 안에 있을 때 피해 1틱 간격
+const HAZARD_FIRST_TICK_MS = 350; // 첫 틱까지 유예(즉발 0)
+
+// ── 킬 콤보(런/전투 한정) ──────────────────────────────────────────────
+// 마지막 킬로부터 COMBO_WINDOW_MS 이내 연속 처치마다 카운터 +1(scene.time.now 비교, per-kill 타이머 0).
+// COMBO_GRADE_STEP 배수 돌파마다 "다음 드롭 1개 grade +1" 보너스를 예약. 창 만료 시 update에서 리셋.
+const COMBO_WINDOW_MS = 3000;   // 다음 킬까지 허용 간격(넘으면 콤보 소멸)
+const COMBO_GRADE_STEP = 10;    // 이 배수(10·20…) 돌파 시 등급 상승 드롭 1회 부여
+const COMBO_HUD_MIN = 2;        // 이 수치 이상부터 HUD 노출(1킬마다 깜빡이는 노이즈 방지)
+
 // 전투 뷰(상단 58%): 4레이어 패럴랙스 + 주인공 + 자동 진행 전투.
 // 적 스폰/이동/공격 타이밍은 CombatDirector가, 적 단위 연출은 Enemy가 담당.
 // 주인공 연출(자동 공격 런지·피격 플래시·위험 펄스)은 이 씬이 소유한다.
@@ -69,6 +84,20 @@ export default class CombatScene extends Phaser.Scene {
     this.combatReady = false;
     this.dangerOn = false;
     this.hitStopUntil = 0;   // 히트스톱 종료 타임스탬프 (ms)
+
+    // 속박(grab) — 이 타임스탬프 전까지 플레이어 자동공격/탭 봉쇄. 새 per-enemy 타이머 0(scene 필드 1개).
+    this.playerBindUntil = 0;
+    this._bindTether = null;      // 속박 시각 신호(draw-once 테더 Graphics) — 만료/teardown 시 회수
+    this._bindTetherTween = null; // 테더 alpha 펄스(repeat:-1) — 회수 시 .stop()
+
+    // 독웅덩이 — scene 소유 배열. draw-once Shape + 단일 update 틱 + reverse-splice 청소(_dmgPool 패턴 동형).
+    this._hazards = [];
+
+    // 킬 콤보 — 런/전투 한정 상태. teardown/새 런에서 리셋(아래 teardownEncounter). 새 타이머 0.
+    this.comboCount = 0;            // 현재 연속 처치 수
+    this.comboExpireAt = 0;         // 이 시각(ms) 넘어가면 콤보 소멸(update가 감시)
+    this._comboGradeBumpPending = false; // 콤보 보너스 — 다음 드롭 1개 grade +1 예약
+
     this.waveShield = 0;     // R9 first_hit_shield — 이번 웨이브 남은 피해무효 차지(웨이브마다 리필)
     this._attacking = false; // 공격 모션 진행 중 플래그 — 탭 연타가 모션을 리셋하지 않게 가드
     this._attackWatchdog = null; // 스윙 복귀 보장 워치독 타이머 — 복귀 onComplete 누락 시 강제 복구
@@ -130,6 +159,7 @@ export default class CombatScene extends Phaser.Scene {
     this.createHud();
     this.createWaveHud();
     this.createResourceHud();
+    this.createComboHud();
     this.createSettingsButton();
     this.createToast();
 
@@ -298,14 +328,19 @@ export default class CombatScene extends Phaser.Scene {
       depth: this.parallax.topDepth + 1,
       motionOk: this.motionOk,
       getWaveParams: () => waveParams(GameState.waveIndex),
+      getWaveIndex: () => GameState.waveIndex, // 엘리트 등장 임계 판정
       onDotTick: (enemy, dmg) => this.applyDotTick(enemy, dmg),
+      onThreatSpawn: (enemy, info) => this.onThreatSpawn(enemy, info),
       player: {
         getX: () => this.playerX,
         // R9 cooldown_down — 레벨당 쿨타임 ×0.88(곱연산). 미선택(lv0)이면 ×1.
         getAttackCooldown: () =>
           this.currentWeapon().cooldown * Math.pow(0.88, GameState.getModifier('cooldown_down')),
         attack: (enemy) => this.playerAttack(enemy),
-        takeDamage: (amount) => this.takePlayerDamage(amount)
+        takeDamage: (amount) => this.takePlayerDamage(amount),
+        // 속박(grab seam B) — 자동공격 봉쇄 + 시각 신호. isBound는 director 자동공격 게이트가 읽음.
+        bindPlayer: (ms, x) => this.bindPlayer(ms, x),
+        isBound: () => this.time.now < this.playerBindUntil
       }
     });
     this.director.start();
@@ -344,11 +379,25 @@ export default class CombatScene extends Phaser.Scene {
     this.director?.clearAll(); // Enemy.destroy가 트윈·컨테이너까지 정리(보스 Enemy 포함)
     this.director = null;
     this.hitStopUntil = 0;
+    // 속박/독웅덩이 상태 정리 — 다음 전투/런으로 안 새게(테더 Graphics·존 Shape·펄스 트윈 회수).
+    this.playerBindUntil = 0;
+    this._clearBindTether();
+    this._clearHazards();
+    // 킬 콤보 리셋 — 콤보 상태/예약/HUD를 새 전투·런으로 안 넘김.
+    this._resetCombo(true);
+    this._comboGradeBumpPending = false; // 등급상승 예약도 다음 런으로 안 새게(콤보×10 직후 사망 케이스).
+    // 위협 경고 라벨 회수 — 씬 전환 중 orphan 텍스트 남지 않게.
+    this.tweens.killTweensOf(this._threatWarnText);
+    this._threatWarnText?.destroy();
+    this._threatWarnText = null;
     // 보스 상태 정리 — clearAll이 보스 Enemy를 파괴하므로 여기선 플래그/HP바만 즉시 회수.
     this._bossActive = false;
     this.boss = null;
     this.bossWaveIndex = 0;
     this.removeBossHpBar();
+    // 무피해 클리어 플래그 리셋 — 새 전투/런이 직전 웨이브의 피격 이력을 물려받지 않게.
+    // (분노=보스 Enemy 파괴로, guard=적 Enemy 파괴로, 사투=onPlayerDeath의 triggerDangerPulse(false)로 각각 정리됨.)
+    GameState.waveHitFlag = false;
     // 사망이 공격 모션 중간에 나면 onComplete가 발화 안 해 플래그가 남는다 → 여기서 강제 해제.
     this._attacking = false;
     this._attackWatchdog?.remove(false); // 스윙 워치독 취소 — teardown 후 발화해 캐릭터를 건드리지 않게
@@ -654,6 +703,9 @@ export default class CombatScene extends Phaser.Scene {
     const shockLv = GameState.getModifier('shock_dmg');
     if (shockLv && enemy.shocked) amount *= 1 + 0.5 * shockLv;
 
+    // [seam C] 행동 패턴 onDamage — guard(정면방어) 등이 들어오는 피해를 가공. 관통타(isPierce)는 방어 무시.
+    if (enemy.behavior?.onDamage) amount = enemy.behavior.onDamage(enemy, amount, { isPierce });
+
     const dmg = Math.max(1, Math.round(amount));
     const killed = enemy.takeDamage(dmg);
     this.spawnDamageNumber(
@@ -707,6 +759,10 @@ export default class CombatScene extends Phaser.Scene {
     // R9 dot_speed — 단순화: 틱 주기 대신 틱 데미지 +30%/레벨(화염/독 공통). 시각/처치 모두 반영.
     const dotLv = GameState.getModifier('dot_speed');
     if (dotLv) dmg = Math.max(1, Math.round(dmg * (1 + 0.3 * dotLv)));
+    // 지역 패시브 — DoT도 속성 매칭(burn→FIRE, toxic→TOXIC)이면 지역 배율 곱연산.
+    const dotAttr = enemy.dotType === 'burn' ? 'FIRE' : enemy.dotType === 'toxic' ? 'TOXIC' : null;
+    const regionDotMult = getRegionCombatBonus(this.currentRegionId, dotAttr);
+    if (regionDotMult !== 1) dmg = Math.max(1, Math.round(dmg * regionDotMult));
     const killed = enemy.takeDamage(dmg, { fromDot: true });
     // DoT 숫자는 작게 + 색 구분(화염 주황 / 독 청록)으로 직접타와 시각 분리, 스팸 억제.
     this.spawnDamageNumber(
@@ -732,7 +788,12 @@ export default class CombatScene extends Phaser.Scene {
       if (!enemy || enemy.dead) return;
       const weapon = this.currentWeapon();
       // 무기 atk는 강화 레벨까지 반영(GameState.getWeaponAtk 단일 출처). 런모디파이어/적기억은 dealDamage 경로 그대로.
-      const base = GameState.stats.atk + GameState.getWeaponAtk(GameState.equippedWeapon);
+      // LAST SALVAGE 사투 모드 — HP 위험(dangerOn) 구간에선 공격 데미지 ×1.4(관통 추가타 base*falloff에도 전파).
+      // 지역 패시브 — 현재 지역이 이 무기 속성을 강화하면 곱연산(사투 배율과 자연 합산, 관통 추가타에도 전파).
+      const base =
+        (GameState.stats.atk + GameState.getWeaponAtk(GameState.equippedWeapon)) *
+        (this.dangerOn ? 1.4 : 1.0) *
+        getRegionCombatBonus(this.currentRegionId, weapon.attrTag);
       this.dealDamage(enemy, base);
       SFX.play('tap_attack'); // 타격 임팩트(스윙당 1회 — 관통 추가타엔 중복 X)
 
@@ -1036,6 +1097,23 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
+  // 사망폭발 링(explode 행동) — 단일 Graphics 원을 스케일업+페이드. onComplete destroy로 누수 0.
+  // motionOk 게이트는 호출부(onEnemyKilled ctx.spawnRing)가 책임. depth는 스파크와 동일 레이어.
+  _spawnBlastRing(x, y, radius, color) {
+    const g = this.add.graphics().setDepth(this.parallax.topDepth + 3).setPosition(x, y);
+    g.lineStyle(3, color, 0.9);
+    g.strokeCircle(0, 0, radius * 0.42); // 시작은 작게 → 트윈으로 blastR 체감 크기까지 확산
+    this.tweens.add({
+      targets: g,
+      scaleX: 2.4,
+      scaleY: 2.4,
+      alpha: 0,
+      duration: 320,
+      ease: 'Quad.out',
+      onComplete: () => { if (g.active) g.destroy(); }
+    });
+  }
+
   // 적 넉백 — 피격 적을 플레이어 반대 방향(우측)으로 worldX 트윈.
   // yoyo=true로 되돌아와 위치 정확히 복구. 보스는 절반 거리.
   // Enemy.update가 매 프레임 syncPosition(worldX 기반)을 호출하므로 트윈이 즉시 시각 반영됨.
@@ -1083,6 +1161,21 @@ export default class CombatScene extends Phaser.Scene {
   // 적 처치 → 웨이브 진행 → 지역별 드롭 롤(웨이브 배율) → 코인 자동/재료 터치 줍기.
   onEnemyKilled(enemy) {
     SFX.play('enemy_kill'); // 처치음(픽셀 크런치) — throttle로 폭주 처치 시 스팸 억제
+    this._registerCombo(); // 킬 콤보 카운터 갱신(창 내 연속 처치 → +1, 임계 돌파 시 등급 상승 예약)
+
+    // [seam D] 행동 패턴 onDeath — explode(사망폭발) 등. scene 부작용은 ctx 콜백으로만 주입(Enemy 비참조).
+    // VFX는 ctx 안에서 motionOk 게이트(behaviors는 모션 분기 모름), 데미지는 reduced-motion에도 적용.
+    if (enemy.behavior?.onDeath) {
+      enemy.behavior.onDeath(enemy, {
+        playerX: this.playerX,
+        takePlayerDamage: (n) => this.takePlayerDamage(n),
+        spawnSparks: (e, c) => { if (this.motionOk) this._spawnImpactSparks(e, c); },
+        spawnRing: (x, y, r, c) => { if (this.motionOk) this._spawnBlastRing(x, y, r, c); },
+        // 독웅덩이 — VFX가 아니라 게임플레이 존이라 reduced-motion에도 생성(펄스만 내부에서 분기).
+        spawnHazard: (hx, r, dmg, dur) => this.spawnHazard(hx, r, dmg, dur)
+      });
+    }
+
     // 1) 처치 누적 → 웨이브 진행. 넘어가면 HUD 갱신 + 배너(지역명 포함).
     const { waveChanged, waveIndex } = GameState.addKill();
     this.refreshWaveHud();
@@ -1123,7 +1216,12 @@ export default class CombatScene extends Phaser.Scene {
     }
 
     // R9 first_hit_shield — 웨이브 진입마다 보유 레벨만큼 방벽 차지 리필.
-    if (waveChanged) this.refillWaveShield();
+    // + 무피해 클리어(CLEAN SWEEP): 직전 웨이브에서 피격이 없었으면 보너스 → 그 뒤 다음 웨이브용으로 플래그 리셋.
+    if (waveChanged) {
+      this.refillWaveShield();
+      if (!GameState.waveHitFlag) this.grantCleanSweep(enemy);
+      GameState.waveHitFlag = false;
+    }
 
     // 2) 드롭 — 현재 웨이브의 지역 배율 반영. 코인은 round, 재료는 floor로 dropMult 반영.
     const regionId = getRegion(GameState.waveIndex).id;
@@ -1146,6 +1244,18 @@ export default class CombatScene extends Phaser.Scene {
     // R9 coin_boost — 코인 드롭 +25%/레벨(레벨 0이면 무변화).
     const coinLv = GameState.getModifier('coin_boost');
     if (coinLv && drop.coins) drop.coins = Math.round(drop.coins * (1 + 0.25 * coinLv));
+
+    // 엘리트 처치 보너스 — 코인 배율+가산 + 떨어진 재료 종별 +1(단단함에 대한 보상).
+    if (enemy.isElite) {
+      drop.coins = Math.round((drop.coins || 0) * ELITE.coinMult) + ELITE.coinBonus;
+      for (const k of MATERIAL_ORDER) if (drop[k]) drop[k] += 1;
+    }
+
+    // 콤보 보너스 — 등급 상승 예약이 있으면 이번 드롭 1개를 grade +1로 치환(소비). 최종 drop dict에 적용.
+    if (this._comboGradeBumpPending) {
+      this._applyComboGradeBump(drop);
+      this._comboGradeBumpPending = false;
+    }
 
     // 3) 코인 — 즉시 자동 가산 + 우상단 HUD로 빨려가는 연출(기존 동작 유지).
     if (drop.coins) {
@@ -1170,6 +1280,168 @@ export default class CombatScene extends Phaser.Scene {
     }
     // 재료가 실제로 떨어졌을 때만 획득 blip(코인은 매 처치 잦아 제외 — 처치음과 겹쳐 시끄러움 방지).
     if (matIdx > 0) SFX.play('pickup');
+  }
+
+  // 무피해 클리어 보너스 — 직전 웨이브를 한 대도 안 맞고 넘겼을 때 1회. 희귀 재료(grade≥2) 1개 추가 드롭.
+  // 드롭은 onEnemyKilled의 재료 경로를 재사용(applyDrop + popMaterial). 안내는 토스트(중앙 웨이브 배너와
+  // 겹치지 않게 상단 토스트 슬롯 사용 — waveChanged가 showWaveBanner를 동시에 띄우므로 의도적 분리).
+  grantCleanSweep(enemy) {
+    const rares = MATERIAL_ORDER.filter((k) => MATERIAL_META[k].grade >= 2);
+    if (rares.length && enemy?.container) {
+      const key = rares[Math.floor(Math.random() * rares.length)];
+      const x = enemy.container.x;
+      const y = enemy.container.y - enemy.displayHeight * 0.5;
+      GameState.applyDrop({ [key]: 1 }, x, y);
+      this.popMaterial(key, 1, x, y, 0, true);
+    }
+    this.showToast('CLEAN SWEEP', null, true);
+  }
+
+  // ── 킬 콤보 ──────────────────────────────────────────────────────────
+  // 처치마다 호출 — 창(COMBO_WINDOW_MS) 내 연속이면 +1, 아니면 1로 리셋. 임계 배수 돌파 시
+  // 다음 드롭 등급 상승을 예약한다. 새 타이머 0(만료 감시는 update가 time.now 비교로 처리).
+  _registerCombo() {
+    const now = this.time.now;
+    this.comboCount = now <= this.comboExpireAt ? this.comboCount + 1 : 1;
+    this.comboExpireAt = now + COMBO_WINDOW_MS;
+    // 10·20… 돌파 → 다음 드롭 1개 grade +1 예약(이미 예약돼 있으면 유지).
+    if (this.comboCount >= COMBO_GRADE_STEP && this.comboCount % COMBO_GRADE_STEP === 0) {
+      this._comboGradeBumpPending = true;
+    }
+    this._updateComboHud();
+  }
+
+  // 콤보 HUD 갱신 — 카운터 텍스트/색 티어 + 팝. COMBO_HUD_MIN 미만이면 숨김(1킬 노이즈 방지).
+  _updateComboHud() {
+    if (!this.comboText) return;
+    if (this.comboCount < COMBO_HUD_MIN) {
+      this.comboText.setVisible(false);
+      return;
+    }
+    const isMilestone = this.comboCount >= COMBO_GRADE_STEP && this.comboCount % COMBO_GRADE_STEP === 0;
+    const color = isMilestone
+      ? '#ff6020'
+      : this.comboCount >= COMBO_GRADE_STEP
+        ? '#ff8a3a'
+        : this.comboCount >= 5
+          ? '#ffd24a'
+          : '#cbb89a';
+    this.comboText
+      .setText(isMilestone ? `COMBO ×${this.comboCount}  등급↑` : `COMBO ×${this.comboCount}`)
+      .setColor(color)
+      .setPosition(Math.round(LOGICAL.width / 2), 31)
+      .setVisible(true);
+
+    if (!this.motionOk) {
+      this.comboText.setScale(1).setAlpha(1);
+      return;
+    }
+    // 팝 — 마일스톤은 더 크게 튕겨 "보너스" 체감.
+    this.tweens.killTweensOf(this.comboText);
+    this.comboText.setAlpha(1).setScale(isMilestone ? 1.5 : 1.22);
+    this.tweens.add({ targets: this.comboText, scale: 1, duration: 160, ease: 'Back.out' });
+  }
+
+  // 콤보 소멸 — 카운터/만료시각 리셋 + HUD 슬라이드아웃. immediate=true(teardown)면 즉시 숨김.
+  // 등급 상승 예약(_comboGradeBumpPending)은 여기서 건드리지 않는다 — 이미 획득한 보너스라 다음 드롭에서 소비.
+  _resetCombo(immediate = false) {
+    this.comboCount = 0;
+    this.comboExpireAt = 0;
+    if (!this.comboText) return;
+    this.tweens.killTweensOf(this.comboText);
+    if (immediate || !this.motionOk || !this.comboText.visible) {
+      this.comboText.setVisible(false).setScale(1).setAlpha(1).setPosition(Math.round(LOGICAL.width / 2), 31);
+      return;
+    }
+    this.tweens.add({
+      targets: this.comboText,
+      alpha: 0,
+      y: 23,
+      duration: 220,
+      ease: 'Quad.in',
+      onComplete: () => {
+        if (this.comboText) {
+          this.comboText.setVisible(false).setAlpha(1).setScale(1).setPosition(Math.round(LOGICAL.width / 2), 31);
+        }
+      }
+    });
+  }
+
+  // 콤보 등급 상승 보너스 적용 — 떨어진 재료 중 최저 등급 1개를 grade+1 재료로 치환.
+  // 재료가 안 떨어졌으면 grade2 재료 1개를 강제 추가(빈손 방지). 최고등급(3)만 떨어진 드문 경우엔 생략.
+  _applyComboGradeBump(drop) {
+    let lowKey = null;
+    let lowGrade = 99;
+    for (const k of MATERIAL_ORDER) {
+      if (drop[k] && MATERIAL_META[k].grade < lowGrade) {
+        lowGrade = MATERIAL_META[k].grade;
+        lowKey = k;
+      }
+    }
+    const targetGrade = (lowKey ? lowGrade : 1) + 1;
+    const pool = MATERIAL_ORDER.filter((k) => MATERIAL_META[k].grade === targetGrade);
+    if (!pool.length) return; // 이미 최고 등급만 떨어짐 — 보너스 생략(아주 드묾)
+    const up = pool[Math.floor(Math.random() * pool.length)];
+    if (lowKey) {
+      drop[lowKey] -= 1;
+      if (drop[lowKey] <= 0) delete drop[lowKey];
+    }
+    drop[up] = (drop[up] || 0) + 1;
+  }
+
+  // ── 위험 적 등장 경고 ───────────────────────────────────────────────────
+  // director가 엘리트/그래버 스폰 시 호출. 2.5s 쿨다운으로 스팸 억제(스폰 빈도와 무관하게 절제).
+  // 엘리트는 미세 카메라 셰이크까지(rare), 그래버는 라벨만. reduced-motion은 _showThreatWarning이 처리.
+  onThreatSpawn(enemy, info) {
+    if (!this.combatReady || this.deathLayer || this.upgradeLayer || this._bossActive) return;
+    const now = this.time.now;
+    if (now < (this._threatWarnUntil || 0)) return; // 쿨다운 중 — 연속 경고 생략
+    this._threatWarnUntil = now + 2500;
+    if (info.elite) {
+      this._showThreatWarning('⚠ 엘리트 출현', '#ffb030');
+      if (this.motionOk && this.cameras?.main) this.cameras.main.shake(90, 0.0035); // 미세 셰이크
+    } else {
+      this._showThreatWarning('⚠ 그래버 — 속박 주의', '#9ab4dc');
+    }
+  }
+
+  // 위험 경고 라벨 — 적이 진입하는 우측 가장자리에서 슬라이드인 → 유지 → 페이드아웃.
+  // 토스트 슬롯(드롭/웨이브)과 겹치지 않게 별도 우측 라벨로 분리. 누수 0(onComplete destroy).
+  _showThreatWarning(text, color) {
+    const x = LOGICAL.width - 8;
+    const y = COMBAT_H * 0.22;
+    const t = this.add
+      .text(x, y, text, { fontFamily: BODY_FONT, fontSize: '12px', color })
+      .setOrigin(1, 0.5)
+      .setDepth(73);
+    t.setShadow(1, 1, '#000000', 0, false, true);
+    this._threatWarnText = t; // teardown이 회수할 수 있게 보관(쿨다운으로 동시 1개)
+
+    if (!this.motionOk) {
+      this.time.delayedCall(900, () => { if (t.active) t.destroy(); });
+      return;
+    }
+    t.setAlpha(0).setX(x + 12);
+    this.tweens.add({
+      targets: t,
+      alpha: 1,
+      x,
+      duration: 160,
+      ease: 'Back.out',
+      onComplete: () => {
+        this.time.delayedCall(700, () => {
+          if (!t.active) return;
+          this.tweens.add({
+            targets: t,
+            alpha: 0,
+            x: x - 8,
+            duration: 220,
+            ease: 'Quad.in',
+            onComplete: () => { if (t.active) t.destroy(); }
+          });
+        });
+      }
+    });
   }
 
   // ── 보스 인카운터 (10웨이브마다) ───────────────────────────────────────
@@ -1203,6 +1475,7 @@ export default class CombatScene extends Phaser.Scene {
         maxHP: stats.maxHP,
         onDeath: () => this.onBossDefeated()
       });
+      this.boss._phaseIdx = 0; // 페이즈 전이 진행 인덱스(정수 가드) — 새 보스마다 0에서 시작(누수 0)
       this.createBossHpBar(stats);
       this.showBossBanner(stats);
     });
@@ -1329,8 +1602,84 @@ export default class CombatScene extends Phaser.Scene {
   // 매 프레임 보스 HP 비율로 바 폭 갱신(rectangle width 1회 — cheap). update()에서 호출.
   updateBossHpBar() {
     if (!this.bossHpBar || !this.boss) return;
-    const ratio = Phaser.Math.Clamp(this.boss.hp / this.boss.maxHP, 0, 1);
+    const boss = this.boss;
+    const ratio = Phaser.Math.Clamp(boss.hp / boss.maxHP, 0, 1);
     this.bossHpBar.fill.width = this.bossHpBar.barW * ratio;
+    // 보스 페이즈 — phases 배열을 임계 교차 시 순서대로 1회씩 발동(_phaseIdx 정수 가드).
+    // 0.66 페이즈가 0.5 분노보다 먼저 걸린다(둘은 독립 — 분노는 아래 별도 가드).
+    const phases = boss.def.phases;
+    if (phases && boss._phaseIdx < phases.length && !boss.dead) {
+      const next = phases[boss._phaseIdx];
+      if (ratio <= next.atRatio) {
+        boss._phaseIdx += 1;
+        this._enterBossPhase(boss, next);
+      }
+    }
+    // 분노 페이즈 — HP 50% 아래로 처음 떨어지면 1회 가속(_enraged 가드). boss는 teardown 시 파괴돼 누수 0.
+    if (!boss._enraged && ratio < 0.5 && !boss.dead) this._enrageBoss(boss);
+  }
+
+  // 보스 분노 진입(1회) — 이동속도 ×1.9, 공격쿨 ×0.65(getAttackCooldown이 def.attackCooldown 읽음).
+  // 진입 연출: white tint 플래시 + 카메라 셰이크(motionOk 게이트) + ENRAGED 토스트.
+  _enrageBoss(boss) {
+    boss._enraged = true;
+    boss.speed *= 1.9;
+    // def는 spawnBoss에서 만든 per-boss 복사본({...stats.def,damage})이라 직접 변형해도 원본 BOSS_TYPES 불변.
+    boss.def.attackCooldown = Math.max(200, Math.round(boss.def.attackCooldown * 0.65));
+    this.showToast('ENRAGED', null, true);
+    SFX.play('boss_intro'); // 위협 강조 스팅어(보스 등장 톤 재사용)
+
+    // tint 플래시는 모션이 아니므로 reduced-motion에도 유지(짧게 white → restoreTint로 복원). 단일 delayedCall.
+    if (boss.sprite?.active) {
+      boss.sprite.setTint(0xffffff);
+      this.time.delayedCall(120, () => { if (!boss.dead && boss.sprite?.active) boss.restoreTint(); });
+    }
+    if (this.motionOk) this.cameras.main.shake(180, 0.006);
+  }
+
+  // 보스 페이즈 전이(1회) — 전이 플래시+셰이크(motionOk 게이트) 후 action별 효과.
+  // action은 문자열 키(BOSS_TYPES.phases) — 데이터는 순수하게 두고 효과는 여기서 분기.
+  _enterBossPhase(boss, phase) {
+    // 전이 플래시 — 모션이 아니므로 reduced-motion에도 유지(짧은 white → restoreTint). 단일 delayedCall.
+    if (boss.sprite?.active) {
+      boss.sprite.setTint(0xffffff);
+      this.time.delayedCall(110, () => { if (!boss.dead && boss.sprite?.active) boss.restoreTint(); });
+    }
+    if (this.motionOk) this.cameras.main.shake(160, 0.005);
+
+    switch (phase.action) {
+      case 'guardUp':
+        // 콜로서스 — 방어 자세(guard 행동 스왑) + 가속. behavior 스왑은 def/Enemy 양쪽 동기화.
+        boss.def.behavior = { type: 'guard', reduce: 0.65 };
+        boss.behavior = ENEMY_BEHAVIORS.guard;
+        boss.guarding = true;
+        boss.speed *= 1.25;
+        boss.restoreTint(); // guard 강철빛 tint 노출
+        this.showToast('방어 태세', null, true);
+        SFX.play('boss_intro');
+        break;
+      case 'summonAdds':
+        // 헤럴드 — 일반 좀비 소환(스태거, 보스 포함 alive≤5 캡).
+        this._bossSummonAdds(boss);
+        this.showToast('증원 소환', null, true);
+        SFX.play('boss_intro');
+        break;
+      default:
+        break;
+    }
+  }
+
+  // 헤럴드 페이즈 소환 — sludge_zombie 2체를 150~200ms 스태거로. 동시 다중 spawn 금지·alive≤5 캡.
+  // delayedCall은 scene 타이머(per-enemy 아님)라 perf 안전. teardown/보스사망 가드로 유령 소환 차단.
+  _bossSummonAdds(boss) {
+    const adds = ['sludge_zombie', 'sludge_zombie'];
+    adds.forEach((key, i) => {
+      this.time.delayedCall(i * 170, () => {
+        if (!this._bossActive || !this.director || boss.dead) return;
+        if (this.director.aliveCount() >= 5) return; // 보스 포함 동시 ≤5
+        this.director.spawnAdd(key);
+      });
+    });
   }
 
   // 보스 처치 시 — 페이드아웃 후 제거(정상 종료). reduced-motion/teardown은 즉시 제거.
@@ -1444,6 +1793,8 @@ export default class CombatScene extends Phaser.Scene {
     if (!this.combatReady || !this.director) return;
     // 이미 공격 모션 진행 중이면 큐잉하지 않고 무시 — 트윈 리셋 반복으로 모션이 깨지는 걸 방지.
     if (this._attacking) return;
+    // 속박(grab) 중이면 탭 공격도 봉쇄 — 자동공격 게이트(director)와 일관.
+    if (this.time.now < this.playerBindUntil) return;
     // 최소 간격 가드 — 140ms 미만 연타는 무시.
     const now = this.time.now;
     if (now - this._lastTapAttack < 140) return;
@@ -1493,6 +1844,7 @@ export default class CombatScene extends Phaser.Scene {
     // 방어력 피해감소 적용(적→플레이어). def*4%, 캡 20%.
     const dmg = Math.max(1, Math.round(amount * defenseMultiplier(GameState.stats.def)));
     this.playerHP = Math.max(0, this.playerHP - dmg);
+    GameState.waveHitFlag = true; // 무피해 클리어(CLEAN SWEEP) 무효화 — 실제 피해를 입은 웨이브로 기록
     this.updateHpBar();
     this.flashPlayer();
     SFX.play('player_hurt'); // 피격 buzz(throttle로 다단 히트 스팸 억제)
@@ -1521,6 +1873,158 @@ export default class CombatScene extends Phaser.Scene {
       duration: 180,
       ease: 'Back.out'
     });
+  }
+
+  // ── 속박(grab) ──────────────────────────────────────────────────────────
+  // 근접 grab 적이 닿으면 ms 동안 자동공격/탭을 봉쇄한다(director.player.isBound로 게이트).
+  // 시각 신호는 draw-once 테더(매 프레임 재그리기 없음) — grabberX↔player 라인 + 발목 마디.
+  // grabberX는 접촉 시점 좌표(grabber는 contactRange에 멈춰 거의 정지라 정적 테더로 충분).
+  bindPlayer(ms, grabberX = null) {
+    this.playerBindUntil = Math.max(this.playerBindUntil, this.time.now + ms);
+    this._showBindTether(grabberX);
+  }
+
+  _showBindTether(grabberX) {
+    this._clearBindTether();
+    const py = this.groundY - this.charDisplayH * 0.45;
+    const gx = grabberX != null ? grabberX : this.playerX + 70;
+    // draw-once — 보라 테더 라인 + 양끝 마디. 이후 alpha 펄스 tween만(재그리기 0).
+    const g = this.add.graphics().setDepth(this.parallax.topDepth + 2);
+    g.lineStyle(2, 0xc060ff, 0.92);
+    g.lineBetween(this.playerX, py, gx, py);
+    g.fillStyle(0xc060ff, 1);
+    g.fillCircle(this.playerX, py, 3);
+    g.fillCircle(gx, py, 3);
+    this._bindTether = g;
+    if (this.motionOk) {
+      this._bindTetherTween = this.tweens.add({
+        targets: g,
+        alpha: 0.4,
+        duration: 150,
+        ease: 'Sine.inOut',
+        yoyo: true,
+        repeat: -1
+      });
+    }
+  }
+
+  _clearBindTether() {
+    this._bindTetherTween?.stop();
+    this._bindTetherTween = null;
+    if (this._bindTether) {
+      this._bindTether.destroy();
+      this._bindTether = null;
+    }
+  }
+
+  // ── 독웅덩이(hazard pool) ───────────────────────────────────────────────
+  // poolOnDeath 행동이 ctx.spawnHazard로 호출. draw-once Shape(타원) + alpha/scale 펄스 tween만.
+  // 동시 3개 캡(초과 시 가장 오래된 것 회수). reduced-motion에도 존은 생성(게임플레이) — 펄스만 생략.
+  spawnHazard(x, radius, dmg, durationMs) {
+    // 캡 초과 — 가장 오래된 존부터 회수(배열 앞이 오래된 것).
+    while (this._hazards.length >= HAZARD_MAX) this._removeHazard(this._hazards[0], 0);
+
+    const now = this.time.now;
+    const y = this.groundY - 2; // 발치 바닥에 깔림
+    // draw-once 타원 Shape — 매 프레임 graphics.clear/재그리기 금지(perf 핵심). 깊이는 캐릭터(+1) 아래.
+    const gfx = this.add
+      .ellipse(x, y, radius * 2, radius * 0.7, COMBAT_COLORS.hazard, 0.26)
+      .setStrokeStyle(1.5, COMBAT_COLORS.toxic, 0.6)
+      .setDepth(this.parallax.topDepth + 0.4);
+
+    const hz = {
+      x,
+      r: radius,
+      dmg,
+      expiresAt: now + durationMs,
+      nextTickAt: now + HAZARD_FIRST_TICK_MS,
+      gfx,
+      pulse: null
+    };
+
+    if (this.motionOk) {
+      gfx.setScale(0.85);
+      // 등장 팝 후 청록 alpha/scale 펄스(repeat:-1). 회수 시 .stop().
+      hz.pulse = this.tweens.add({
+        targets: gfx,
+        alpha: 0.46,
+        scaleX: 1.06,
+        scaleY: 1.06,
+        duration: 560,
+        ease: 'Sine.inOut',
+        yoyo: true,
+        repeat: -1
+      });
+    }
+    this._hazards.push(hz);
+  }
+
+  // 단일 update 틱 — 만료 회수(reverse-splice) + 플레이어가 존 안이면 nextTick 도달 시 1틱.
+  // canTick=false(오버레이 중)면 피해는 멈추되 만료 청소는 계속(누수 0).
+  _updateHazards(now, canTick) {
+    if (this._hazards.length === 0) return;
+    for (let i = this._hazards.length - 1; i >= 0; i--) {
+      const hz = this._hazards[i];
+      if (now >= hz.expiresAt) {
+        this._removeHazard(hz, i);
+        continue;
+      }
+      if (
+        canTick &&
+        now >= hz.nextTickAt &&
+        this.playerHP > 0 &&
+        Math.abs(this.playerX - hz.x) < hz.r
+      ) {
+        hz.nextTickAt = now + HAZARD_TICK_MS;
+        this.takePlayerDamage(hz.dmg); // 방어/방벽/사망 처리 재사용(작은 dmg → small 숫자 체감)
+        // 이 틱이 사망을 유발하면 teardown이 _clearHazards로 배열을 비운다 → 순회 즉시 중단(재진입 가드).
+        if (!this.combatReady) return;
+      }
+    }
+  }
+
+  // 존 1개 회수 — 배열에서 즉시 제거(중복 처리 방지) 후 펄스 stop + gfx 페이드아웃 destroy.
+  _removeHazard(hz, idx) {
+    this._hazards.splice(idx, 1);
+    hz.pulse?.stop();
+    const g = hz.gfx;
+    if (!g?.active) return;
+    if (!this.motionOk) {
+      g.destroy();
+      return;
+    }
+    (this._hazardFx ||= []).push(g); // 페이드 중 gfx 추적 — teardown이 이 200ms 창에 끼어도 회수.
+    this.tweens.add({
+      targets: g,
+      alpha: 0,
+      scaleX: 0.6,
+      scaleY: 0.6,
+      duration: 200,
+      ease: 'Quad.in',
+      onComplete: () => {
+        const fx = this._hazardFx;
+        if (fx) { const i = fx.indexOf(g); if (i >= 0) fx.splice(i, 1); }
+        if (g.active) g.destroy();
+      }
+    });
+  }
+
+  // 전체 정리(teardown/재시작) — 펄스 stop + 진행 트윈 kill + Shape destroy + 배열 비움(페이드 중 gfx 포함).
+  _clearHazards() {
+    for (const hz of this._hazards) {
+      hz.pulse?.stop();
+      if (hz.gfx?.active) {
+        this.tweens.killTweensOf(hz.gfx);
+        hz.gfx.destroy();
+      }
+    }
+    this._hazards.length = 0;
+    if (this._hazardFx) {
+      for (const g of this._hazardFx) {
+        if (g?.active) { this.tweens.killTweensOf(g); g.destroy(); }
+      }
+      this._hazardFx.length = 0;
+    }
   }
 
   // [모션 훅] 사망 확정 순간 붉은 화면 플래시 — "당했다" 강조. 과하지 않게 짧고 강하게.
@@ -2522,8 +3026,9 @@ export default class CombatScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setDepth(62);
 
+    // 좌상단 HUD 세로 리듬 — HP바(8) → 라벨(24) → WAVE(40) → 진행바(56), 일관 16px 스텝.
     this.add
-      .text(x, 26, 'SCRAPPER', {
+      .text(x, 24, 'SCRAPPER', {
         fontFamily: PIXEL_FONT,
         fontSize: '10px',
         color: '#cbb89a'
@@ -2543,8 +3048,9 @@ export default class CombatScene extends Phaser.Scene {
   // ── 웨이브 HUD (HP바/라벨 아래, 좌상단) ──────────────────────────────
   createWaveHud() {
     const x = 10;
+    // WAVE/RUN y=40 — createHud 리듬(8→24→40→56) 연속. 진행바 barY=56로 16px 스텝 유지.
     this.waveText = this.add
-      .text(x, 42, 'WAVE 0', {
+      .text(x, 40, 'WAVE 0', {
         fontFamily: PIXEL_FONT,
         fontSize: '13px',
         color: '#ff6020'
@@ -2556,7 +3062,7 @@ export default class CombatScene extends Phaser.Scene {
     // RUN #N — WAVE 옆(바 우측 끝선), 회차 표식. WAVE보다 위계상 위라 골드(#f0c040,
     // 사망 오버레이 RUN과 동일 톤)로 구분. 현재 진행 런 = runCount+1(사망 오버레이와 동일).
     this.runText = this.add
-      .text(78, 42, '', {
+      .text(78, 40, '', {
         fontFamily: PIXEL_FONT,
         fontSize: '13px',
         color: '#f0c040'
@@ -2565,7 +3071,7 @@ export default class CombatScene extends Phaser.Scene {
       .setDepth(61);
     this.runText.setShadow(1, 1, '#000000', 0, false, true);
 
-    const barY = 60;
+    const barY = 56;
     this.waveBarW = 72;
     this.add
       .rectangle(x, barY, this.waveBarW + 2, 6, 0x000000, 0.55)
@@ -2591,6 +3097,20 @@ export default class CombatScene extends Phaser.Scene {
     this.runText?.setText(`RUN #${GameState.meta.runCount + 1}`);
     const inWave = GameState.runKills % WAVE.killsPerWave;
     this.waveBarFill.width = this.waveBarW * (inWave / WAVE.killsPerWave);
+  }
+
+  // 지역 패시브 버프 → 한 줄 라벨 {text,color}. 보너스 없는 지역은 null.
+  // 속성 1채널(현 데이터)만 노출 — 여러 채널이 생겨도 가장 큰 1개만 보여 짧게 유지.
+  _regionBonusLabel(region) {
+    const b = region?.combatBonus;
+    if (!b) return null;
+    const NAMES = { FIRE: '화염', TOXIC: '독', SHOCK: '감전', PIERCE: '관통', PHYSICAL: '물리' };
+    const COLORS = { FIRE: '#ff6020', TOXIC: '#20ff9a', SHOCK: '#66ddff', PIERCE: '#88ccff', PHYSICAL: '#cbb89a' };
+    let bestAttr = null, bestMult = 1;
+    for (const k of Object.keys(b)) if (b[k] > bestMult) { bestMult = b[k]; bestAttr = k; }
+    if (!bestAttr) return null;
+    const pct = Math.round((bestMult - 1) * 100);
+    return { text: `이 지역 · ${NAMES[bestAttr] || bestAttr} 데미지 +${pct}%`, color: COLORS[bestAttr] || '#cbb89a' };
   }
 
   // [모션 훅] 웨이브 진입 배너 — "WAVE N" + 현재 지역명 서브라인. 지역이 바뀌는
@@ -2624,6 +3144,16 @@ export default class CombatScene extends Phaser.Scene {
     sub.setShadow(1, 1, '#000000', 0, false, true);
 
     banner.add([main, sub]);
+
+    // 지역 패시브 버프 1줄 안내(테마 지역 한정) — "이 지역: 독 데미지 +30%" 톤. 작은 화면이라 짧게.
+    const bonus = this._regionBonusLabel(region);
+    if (bonus) {
+      const bonusTxt = this.add
+        .text(0, 35, bonus.text, { fontFamily: BODY_FONT, fontSize: '12px', color: bonus.color })
+        .setOrigin(0.5);
+      bonusTxt.setShadow(1, 1, '#000000', 0, false, true);
+      banner.add(bonusTxt);
+    }
 
     if (!this.motionOk) {
       this.time.delayedCall(700, () => banner.destroy());
@@ -2696,6 +3226,21 @@ export default class CombatScene extends Phaser.Scene {
   syncResourceHud() {
     if (!this.resHud) return;
     this.resHud.coins.txt.setText(String(GameState.coins));
+  }
+
+  // ── 킬 콤보 HUD (상단 중앙, 코인 아래) ────────────────────────────────
+  // 단일 Text(풀 불필요) — 처치마다 갱신/팝, 창 만료 시 슬라이드아웃. depth 62(코인 61 위).
+  createComboHud() {
+    this.comboText = this.add
+      .text(Math.round(LOGICAL.width / 2), 31, '', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '13px',
+        color: '#ffd24a'
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(62)
+      .setVisible(false);
+    this.comboText.setShadow(1, 1, '#000000', 0, false, true);
   }
 
   // ── 환경설정 진입 버튼 (우상단, 톱니) ───────────────────────────────────
@@ -3108,6 +3653,10 @@ export default class CombatScene extends Phaser.Scene {
     if (on === this.dangerOn) return;
     this.dangerOn = on;
 
+    // LAST SALVAGE 사투 모드 — off→on 전이 1회만 토스트(이 메서드의 동일상태 early-return이 중복 가드).
+    // 빠져나오면(on=false) 토스트 없이 base 배율(×1.0)이 playerAttack에서 자동 원복.
+    if (on && this.combatReady) this.showToast('LAST SALVAGE', null, true);
+
     if (on) {
       if (!this.motionOk) {
         this.dangerVignette.setAlpha(0.5);
@@ -3178,5 +3727,14 @@ export default class CombatScene extends Phaser.Scene {
     }
     // 보스 HP바 — 살아있는 보스 HP 비율로 갱신(rectangle width 1회, cheap).
     if (this.bossHpBar && this.boss && !this.boss.dead) this.updateBossHpBar();
+
+    // 독웅덩이 — 만료 청소는 항상, 피해 틱은 전투 활성 + 오버레이 없을 때만(정지 중 무피해).
+    this._updateHazards(time, this.combatReady && !this.upgradeLayer && !this.deathLayer);
+
+    // 속박 테더 — 봉쇄 만료 시 시각 신호 회수(scene.time.now 비교, 새 타이머 0).
+    if (this._bindTether && time >= this.playerBindUntil) this._clearBindTether();
+
+    // 킬 콤보 만료 — 창(comboExpireAt)을 넘기면 소멸(HUD 슬라이드아웃). per-kill 타이머 0.
+    if (this.comboCount > 0 && time > this.comboExpireAt) this._resetCombo();
   }
 }
