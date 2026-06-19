@@ -113,3 +113,20 @@ export const CHARACTER = {
   xRatio: 0.3, // 사이드스크롤 주인공 정석: 좌측 1/3
   ...CHARACTER_STAGES[BASE_STAGE]
 };
+
+// 프레임 애니(walk/attack/hit/death) 아틀라스 배치 상수.
+// 정규화 스크립트가 전 단계·전 액션을 동일 캔버스(512)·동일 발끝 베이스라인(488/512)·동일 스케일로
+// 통일했으므로 origin/스케일을 단계별로 실측할 필요가 없다(= perf 게이트 "origin 재실측 불필요").
+//  - contentFraction: 서있는 콘텐츠 키 / 캔버스 = TARGET_STAND_H(384)/512. 패킹 다운스케일에도 불변.
+//  - displayContentH: 화면에 보이는 캐릭터 키(px). 기존 progression 룩과 비슷하게 맞춘 튜닝값.
+//  - origin: 발끝(488/512≈0.9531) + 가로중앙(0.5). 전 단계/전 액션 공통.
+//  - fps: 기획서 "전투 애니 8~12fps".
+export const CHARACTER_ANIM = {
+  contentFraction: 0.75,
+  // 적 displayHeight(흔한 적 122~132, 탱크 145)와 균형 — 주인공이 적보다 커 보이지 않게.
+  // 더 키우/줄이려면 이 값만 조정(런타임 표시 키, px).
+  displayContentH: 118,
+  origin: { x: 0.5, y: 0.9531 },
+  idleFrame: 'walk_1',
+  fps: { walk: 9, attack: 11, hit: 12, death: 9 }
+};

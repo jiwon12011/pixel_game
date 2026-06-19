@@ -18,10 +18,10 @@ const OUT = path.join(SRC, 'normalized');
 const ALPHA = 64;
 
 // 출력 규격 — 모든 프레임 공통. 가장 넓은 포즈(사망 누움)·키 큰 단계까지 수용하는 정사각.
-const CANVAS = 1024;
-const TARGET_STAND_H = 800;     // 서있는 프레임 기준 캐릭터 콘텐츠 높이(px). 캔버스 대비 ~78%.
-                                // 팔/무기를 든 포즈는 이보다 커지므로 상단 여유를 남겨 잘림 방지.
-const BASELINE_FROM_BOTTOM = 48; // 발끝을 캔버스 하단에서 이만큼 위에.
+const CANVAS = 512;             // perf 게이트: 게임 표시(displayHeight175×2≈350px)에 맞춘 작업 해상도.
+const TARGET_STAND_H = 384;     // 서있는 프레임 기준 캐릭터 콘텐츠 높이(px). 캔버스 대비 75%.
+                                // 하드 상한 400 — 넘으면 stage_02~08(원본 ~400px)이 업스케일 블러 진입.
+const BASELINE_FROM_BOTTOM = 24; // 발끝을 캔버스 하단에서 이만큼 위에.
 const STAND_REF = 'walk_1';      // 단계 스케일 산출에 쓰는 "서있는" 기준 프레임.
 
 const ACTION_ORDER = ['walk_0','walk_1','walk_2','walk_3','attack_0','attack_1','attack_2','hit_0','hit_1','death_0','death_1','death_2'];

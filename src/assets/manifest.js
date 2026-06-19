@@ -35,6 +35,27 @@ import scrapperStage06Url from '../../assets/ai-generated/characters/progression
 import scrapperStage07Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_07.webp';
 import scrapperStage08Url from '../../assets/ai-generated/characters/progression/web/scrapper_stage_08.webp';
 
+// 주인공 프레임 애니 아틀라스 8단계 — 단계당 webp 시트 1장 + Phaser JSON Hash 1장.
+// 재생성: node scripts/pack-anim-atlas.mjs  (정규화된 12프레임/단계를 trimmed 아틀라스로 패킹).
+// json은 ?url로 import해 load.atlas(key, pngUrl, jsonUrl)에 그대로 넘긴다(파싱 객체 아님).
+// stage_01만 PreloadScene이 선행로드, 2~8은 단계 상승 시 CombatScene이 지연 로드(현재/다음만 유지).
+import animStage01Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_01.webp';
+import animStage01Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_01.json?url';
+import animStage02Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_02.webp';
+import animStage02Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_02.json?url';
+import animStage03Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_03.webp';
+import animStage03Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_03.json?url';
+import animStage04Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_04.webp';
+import animStage04Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_04.json?url';
+import animStage05Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_05.webp';
+import animStage05Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_05.json?url';
+import animStage06Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_06.webp';
+import animStage06Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_06.json?url';
+import animStage07Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_07.webp';
+import animStage07Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_07.json?url';
+import animStage08Png from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_08.webp';
+import animStage08Json from '../../assets/ai-generated/characters/animation/atlas/scrapper_stage_08.json?url';
+
 // UI 탭 아이콘 4종 — 128px q85 webp 사본(탭바 28px 렌더라 충분). PNG 대비 ~95% 경량(초기 로드 -30%).
 // 재생성: npm run optimize:assets (ui 카테고리)
 import tabCraftUrl from '../../assets/ai-generated/ui/individual/web/tab_crafting.webp';
@@ -138,7 +159,7 @@ export const IMAGE_MANIFEST = [
   { key: TEX.BG_L2, url: factoryUrl },
   { key: TEX.BG_L3, url: wreckageUrl },
   { key: TEX.BG_L4, url: groundUrl },
-  { key: TEX.SCRAPPER_STAGE_01, url: scrapperStage01Url },
+  // 주인공은 프레임 애니 아틀라스(ANIM_MANIFEST)로 부팅 — 정적 progression stage_01은 더 이상 선행로드 안 함.
   { key: TEX.TAB_CRAFT, url: tabCraftUrl },
   { key: TEX.TAB_SKILL, url: tabSkillUrl },
   { key: TEX.TAB_STATS, url: tabStatsUrl },
@@ -169,6 +190,20 @@ export const STAGE_MANIFEST = {
   6: { key: TEX.SCRAPPER_STAGE_06, url: scrapperStage06Url },
   7: { key: TEX.SCRAPPER_STAGE_07, url: scrapperStage07Url },
   8: { key: TEX.SCRAPPER_STAGE_08, url: scrapperStage08Url }
+};
+
+// 진행 단계 프레임 애니 아틀라스 1~8 — stage 번호 → { key, png, json }.
+// key는 STAGE_MANIFEST(정적 포즈)와 다른 별도 텍스처(아틀라스). 단계 상승 시 CombatScene이
+// load.atlas로 지연 로드 + 다음 단계 선행 캐시(STAGE_MANIFEST와 동일 패턴).
+export const ANIM_MANIFEST = {
+  1: { key: 'scrapper-anim-01', png: animStage01Png, json: animStage01Json },
+  2: { key: 'scrapper-anim-02', png: animStage02Png, json: animStage02Json },
+  3: { key: 'scrapper-anim-03', png: animStage03Png, json: animStage03Json },
+  4: { key: 'scrapper-anim-04', png: animStage04Png, json: animStage04Json },
+  5: { key: 'scrapper-anim-05', png: animStage05Png, json: animStage05Json },
+  6: { key: 'scrapper-anim-06', png: animStage06Png, json: animStage06Json },
+  7: { key: 'scrapper-anim-07', png: animStage07Png, json: animStage07Json },
+  8: { key: 'scrapper-anim-08', png: animStage08Png, json: animStage08Json }
 };
 
 // 무기 아이콘 18종 — 합성 탭 첫 진입 시 1회 지연 로드 후 캐시(키 = 무기 id).

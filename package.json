@@ -10,7 +10,8 @@
     "preview": "vite preview --port 4173",
     "optimize:bg": "node scripts/optimize-bg.mjs",
     "optimize:variants": "node scripts/optimize-variants.mjs",
-    "optimize:assets": "node scripts/optimize-assets.mjs"
+    "optimize:assets": "node scripts/optimize-assets.mjs",
+    "pack:anim": "node scripts/pack-anim-atlas.mjs"
   },
   "dependencies": {
     "phaser": "^3.80.1"

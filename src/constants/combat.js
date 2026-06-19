@@ -45,11 +45,12 @@ export const PLAYER = {
 //   displaySize — 화면상 무기 표시 높이 px(원본 128 webp에서 스케일 산출). 48은 내린 손에 쥔 톤.
 //   angle       — 무기 기울기(°). -16은 휘두름이 아니라 손에 쥐고 비스듬히 내린 자세 각도.
 //   depthOffset — parallax.topDepth 기준 깊이 가산(캐릭터=+1보다 확실히 위, HUD=50+보단 아래).
+// 프레임 애니 아틀라스 기준 재측정(walk_1, 512캔버스: 무기손≈(300,348), 발끝488, 중심256).
 export const WEAPON_HAND = {
-  offsetX: 28,
-  heightRatio: 0.40,
-  offsetY: 2,
-  displaySize: 64,
+  offsetX: 14,
+  heightRatio: 0.36,
+  offsetY: 0,
+  displaySize: 46,
   angle: -16,
   depthOffset: 5
 };

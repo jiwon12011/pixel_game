@@ -1,10 +1,10 @@
 import Phaser from 'phaser';
 import ParallaxBackground from '../objects/ParallaxBackground.js';
 import CombatDirector from '../objects/CombatDirector.js';
-import { TEX, ENEMY_MANIFEST, BOSS_MANIFEST, WEAPON_MANIFEST, REGION_BG_MANIFEST, STAGE_MANIFEST } from '../assets/manifest.js';
+import { TEX, ENEMY_MANIFEST, BOSS_MANIFEST, WEAPON_MANIFEST, REGION_BG_MANIFEST, ANIM_MANIFEST } from '../assets/manifest.js';
 import {
   CHARACTER,
-  CHARACTER_STAGES,
+  CHARACTER_ANIM,
   COMBAT_H,
   COMBAT_VIEW,
   GROUND_LINE_RATIO,
@@ -56,6 +56,25 @@ const toHexStr = (n) => '#' + n.toString(16).padStart(6, '0');
 
 // 데미지 숫자 풀 상한 — 동시에 24개를 넘으면 새 숫자는 생략(밀집 전투에서도 그 정도면 시각적으로 충분).
 const DMG_POOL_MAX = 24;
+
+// ── 공격 프레임별 손 무기 앵커 오프셋 ────────────────────────────────────────
+// 프레임 애니가 팔 스윙을 담당하고, 손에 쥔 무기(오버레이)는 이 오프셋으로 프레임을 따라간다.
+// 트윈 thrust를 대체 — animationupdate에서 currentFrame을 읽어 _weaponSwingProxy에 세팅한다.
+//   x: 손 기준 가로 px(+앞), y: 세로 px(-위/+아래), a: 무기 각도(°, Phaser CW=양수).
+// 포즈는 8단계 공통(정규화 동일 골격)이라 단계 무관 단일 테이블.
+// [튜닝 필요] 프레임을 눈으로 본 1차 추정값 — 실제 손 위치에 맞춰 미세조정.
+// 손 무기 오버레이 표시 여부. 프레임이 맨주먹이라 떠 있는 무기가 손에서 떨어져 보여 끔(false).
+// 무기 정체성은 HUD 장착표시 + 속성별 타격 VFX로 전달. 되살리려면 true.
+const SHOW_HAND_WEAPON = false;
+
+// 몸 프레임은 거의 정지(생성 결과)라 공격 "휘두름"은 이 오프셋 스윙이 carry한다. 작아진 캐릭터(118px)에 맞춘 값.
+const ATTACK_HAND_OFFSETS = {
+  attack_0: { x: -6, y: -24, a: -92 }, // 와인드업 — 무기 머리 위-뒤로 치켜듦
+  attack_1: { x: 3, y: -9, a: -36 },   // 스윙 중간
+  attack_2: { x: 16, y: 12, a: 36 }    // 임팩트 — 앞+아래로 내려찍기
+};
+// 데미지/히트스톱/셰이크/VFX를 동기화할 임팩트 프레임(내려찍는 접촉 포즈).
+const ATTACK_IMPACT_FRAME = 'attack_2';
 
 // ── 독웅덩이(hazard pool) 상수 (Phase 2) ────────────────────────────────
 // 동시 존 상한 3개(초과 시 가장 오래된 것 회수). 틱 주기는 scene.time.now 비교(per-zone 타이머 0).
@@ -110,7 +129,7 @@ export default class CombatScene extends Phaser.Scene {
     this._onboardTimer = null;
 
     // 진행 단계 텍스처 키 집합 — VRAM 회수 화이트리스트. stage1(부팅 선행로드)은 회수 로직에서 별도 보호.
-    this._stageTexKeys = new Set(Object.values(STAGE_MANIFEST).map((e) => e.key));
+    this._stageTexKeys = new Set(Object.values(ANIM_MANIFEST).map((e) => e.key));
 
     // 데미지 숫자 오브젝트 풀 — 매 타격/DoT마다 add.text 생성 시 Canvas→GPU 텍스처 업로드가 폭증.
     // 비활성 Text를 재사용(setVisible(false) 보관 → 갱신 후 재활성)해 GameObject/텍스처 churn을 줄인다.
@@ -237,6 +256,9 @@ export default class CombatScene extends Phaser.Scene {
       offStats();
       offDrop();
       this.input.off('pointerdown', this.onCombatTap, this);
+      // 주인공 프레임 애니 리스너 해제(누수 방지). 씬 종료가 sprite를 파괴하지만 명시적으로 떼어둔다.
+      this.character?.off('animationupdate', this._onPlayerAnimUpdate, this);
+      this.character?.off('animationcomplete', this._onPlayerAnimComplete, this);
       // 데미지 숫자 풀 정리 — 유휴 Text 파괴 후 비움(활성 Text는 씬 종료가 자동 파괴).
       this._dmgPool.forEach((t) => t.destroy());
       this._dmgPool.length = 0;
@@ -400,6 +422,8 @@ export default class CombatScene extends Phaser.Scene {
     GameState.waveHitFlag = false;
     // 사망이 공격 모션 중간에 나면 onComplete가 발화 안 해 플래그가 남는다 → 여기서 강제 해제.
     this._attacking = false;
+    this._pendingAttackApply = null;   // 임팩트 미발화 콜백 잔류 방지
+    this._attackImpactFired = false;
     this._attackWatchdog?.remove(false); // 스윙 워치독 취소 — teardown 후 발화해 캐릭터를 건드리지 않게
     this._attackWatchdog = null;
 
@@ -427,65 +451,164 @@ export default class CombatScene extends Phaser.Scene {
     }
   }
 
-  // ── 주인공 ──────────────────────────────────────────────────────────
+  // ── 주인공 (프레임 애니: walk/attack/hit/death) ───────────────────────────
   createCharacter() {
-    // 부팅은 항상 캐시된 stage1 텍스처로 캐릭터를 만든다(stage1만 선행로드 보장).
-    const bootKey = STAGE_MANIFEST[1].key;
-    const tex = this.textures.get(bootKey).getSourceImage();
-    this.charScale = CHARACTER.displayHeight / tex.height;
-    this.charDisplayH = CHARACTER.displayHeight;
+    // 부팅은 항상 캐시된 stage1 아틀라스로 캐릭터를 만든다(stage1만 선행로드 보장).
+    // 이어하기로 현재 단계 아틀라스가 이미 있으면 그걸로 시작(없으면 stage1 → 아래 swap이 지연 적용).
+    const bootStage = this.textures.exists(ANIM_MANIFEST[this.characterStage]?.key)
+      ? this.characterStage
+      : 1;
+    const atlasKey = ANIM_MANIFEST[bootStage].key;
+    this._applyCharScale(atlasKey); // charScale/charDisplayH 산출(정규화 캔버스 기준, 전 단계 공통)
 
     this.shadow = this.add
-      .ellipse(
-        this.playerX,
-        this.groundY + 4,
-        CHARACTER.displayHeight * 0.42,
-        12,
-        0x000000,
-        0.35
-      )
+      .ellipse(this.playerX, this.groundY + 4, this.charDisplayH * 0.42, 12, 0x000000, 0.35)
       .setDepth(this.parallax.topDepth + 0.5);
 
+    // Image → Sprite: 프레임 애니 재생이 가능하도록. origin은 정규화 발끝(전 단계 공통).
     this.character = this.add
-      .image(this.playerX, this.groundY, bootKey)
-      // originX는 프레임 중심이 아니라 실측한 "몸 중심"(무기 패딩 보정) → playerX에 정확히 안착
-      .setOrigin(CHARACTER.originX, CHARACTER.footOriginY)
+      .sprite(this.playerX, this.groundY, atlasKey, CHARACTER_ANIM.idleFrame)
+      .setOrigin(CHARACTER_ANIM.origin.x, CHARACTER_ANIM.origin.y)
       .setScale(this.charScale)
       .setDepth(this.parallax.topDepth + 1);
 
+    // 공격 프레임별 손 오프셋을 담는 프록시(updateHandWeaponPos가 매 프레임 읽음). idle=0.
+    this._weaponSwingProxy = { offsetX: 0, offsetY: 0 };
+    this._playerDead = false;
+
+    // 프레임 이벤트 리스너 1회 등록(누수 방지를 위해 shutdown에서 off).
+    //  - animationupdate: 공격 중 손 무기 오프셋 + 임팩트(데미지/히트스톱/셰이크/VFX) 동기화
+    //  - animationcomplete: attack/hit → walk 복귀, death → 마지막 프레임 정지
+    this.character.on('animationupdate', this._onPlayerAnimUpdate, this);
+    this.character.on('animationcomplete', this._onPlayerAnimComplete, this);
+
+    this._ensureStageAnims(bootStage);
+    if (this.motionOk) this.character.play(this._animKey(bootStage, 'walk')); // 자동전진 walk 루프
+
     this.startIdleBob();
 
-    // 이어하기/유산으로 stage>1이면 해당 단계 텍스처/origin으로 즉시 교체(연출 없이).
-    // stage1 텍스처는 부팅에 항상 있으니 상위 단계만 지연 로드 후 적용된다.
+    // 이어하기/유산으로 stage>1이면 해당 단계 아틀라스로 즉시 교체(연출 없이).
     if (this.characterStage > 1) this.swapCharacterStage(this.characterStage, { silent: true });
   }
 
-  // ── 진행 단계 외형 교체 (8단계) ─────────────────────────────────────────
-  // 능력치 성장(statPower)으로 단계가 오르면 해당 단계 텍스처로 교체한다.
-  // 텍스처가 캐시에 있으면 즉시, 없으면 지연 로드 후 적용. 전환 히치 방지를 위해
-  // 다음 단계(newStage+1)를 같은 로드 배치에 실어 선행 캐시한다(메모리 최대 2~3장).
-  // opts.silent: 성장 연출 없이 텍스처만 교체(부팅/새 런 복구용).
-  swapCharacterStage(newStage, opts = {}) {
-    const entry = STAGE_MANIFEST[newStage];
-    const conf = CHARACTER_STAGES[newStage];
-    if (!entry || !conf) return;
+  // 애니 키 — `scrap-<stage>-<action>`(walk/attack/hit/death). 씬 전역 유일.
+  _animKey(stage, action) {
+    return `scrap-${stage}-${action}`;
+  }
 
-    const next = STAGE_MANIFEST[newStage + 1]; // 다음 단계 선행 캐시 대상(있으면)
+  // 정규화 캔버스(아틀라스 sourceSize) 기준으로 표시 스케일 산출. 전 단계 동일 기하라 결과도 동일.
+  //  charScale: 콘텐츠 키(=캔버스×contentFraction)가 displayContentH가 되도록.
+  //  charDisplayH: 화면에 보이는 캐릭터 키(px) — 손 무기 높이비(WEAPON_HAND.heightRatio)의 기준.
+  _applyCharScale(atlasKey) {
+    const frame = this.textures.get(atlasKey).frames[CHARACTER_ANIM.idleFrame];
+    const canvasH = frame?.realHeight || 512; // 트림 전 원캔버스 높이(sourceSize)
+    this.charScale = CHARACTER_ANIM.displayContentH / (CHARACTER_ANIM.contentFraction * canvasH);
+    this.charDisplayH = CHARACTER_ANIM.displayContentH;
+  }
+
+  // 단계 4액션 애니를 1회 정의(씬 전역, exists 가드 → 8단계×4=최대 32개, 각 1회).
+  // 아틀라스가 캐시에 있어야 프레임 참조가 유효 — 로드 완료 후 호출한다.
+  _ensureStageAnims(stage) {
+    const atlasKey = ANIM_MANIFEST[stage]?.key;
+    if (!atlasKey || !this.textures.exists(atlasKey)) return false;
+    const fps = CHARACTER_ANIM.fps;
+    const defs = [
+      ['walk', ['walk_0', 'walk_1', 'walk_2', 'walk_3'], fps.walk, -1],
+      ['attack', ['attack_0', 'attack_1', 'attack_2'], fps.attack, 0],
+      ['hit', ['hit_0', 'hit_1'], fps.hit, 0],
+      ['death', ['death_0', 'death_1', 'death_2'], fps.death, 0]
+    ];
+    for (const [action, frames, frameRate, repeat] of defs) {
+      const key = this._animKey(stage, action);
+      if (this.anims.exists(key)) continue;
+      this.anims.create({
+        key,
+        frames: frames.map((f) => ({ key: atlasKey, frame: f })),
+        frameRate,
+        repeat
+      });
+    }
+    return true;
+  }
+
+  // walk 루프 재생(평상시 자동전진). reduced-motion/사망 시 호출 안 함.
+  _playWalk() {
+    const key = this._animKey(this.characterStage, 'walk');
+    if (this.anims.exists(key)) this.character?.play(key);
+  }
+
+  // 매 프레임 콜백 — 공격 중에만 동작. 손 무기 오프셋을 프레임에 맞춰 갱신하고,
+  // 임팩트 프레임 도달 시 데미지/히트스톱/셰이크/VFX를 1회 동기 발화(_pendingAttackApply).
+  _onPlayerAnimUpdate(_anim, frame) {
+    if (!this._attacking) return;
+    const name = frame?.textureFrame;
+    const off = ATTACK_HAND_OFFSETS[name];
+    if (off && this._weaponSwingProxy) {
+      this._weaponSwingProxy.offsetX = off.x;
+      this._weaponSwingProxy.offsetY = off.y;
+      if (off.a != null && this.weaponSprite?.active) this.weaponSprite.setAngle(off.a);
+    }
+    if (name === ATTACK_IMPACT_FRAME && !this._attackImpactFired) {
+      this._attackImpactFired = true;
+      // apply 예외가 onComplete 복귀를 막지 못하게 격리(_attacking stuck 방지).
+      try {
+        this._pendingAttackApply?.();
+      } catch (e) {
+        console.error('[attack apply]', e);
+      }
+    }
+  }
+
+  // 1회성 애니 종료 처리 — attack/hit는 walk로 복귀, death는 마지막 프레임에 정지(요구사항).
+  _onPlayerAnimComplete(anim) {
+    const key = anim?.key || '';
+    if (key.endsWith('-attack')) {
+      this._finishAttack();
+    } else if (key.endsWith('-hit')) {
+      if (!this._playerDead && !this._attacking && this.motionOk) this._playWalk();
+    } else if (key.endsWith('-death')) {
+      this.character?.anims?.stop(); // 마지막 프레임 고정
+    }
+  }
+
+  // 공격 모션 종료 — 상태/워치독/손 오프셋 정리 후 walk 복귀. 정상 onComplete·강제복구 공용.
+  _finishAttack() {
+    this._attacking = false;
+    this._pendingAttackApply = null;
+    this._attackImpactFired = false;
+    this._attackWatchdog?.remove(false);
+    this._attackWatchdog = null;
+    if (this._weaponSwingProxy) {
+      this._weaponSwingProxy.offsetX = 0;
+      this._weaponSwingProxy.offsetY = 0;
+    }
+    if (this.weaponSprite?.active) this.weaponSprite.setAngle(WEAPON_HAND.angle);
+    if (!this._playerDead && this.motionOk) this._playWalk();
+  }
+
+  // ── 진행 단계 외형 교체 (8단계, 아틀라스) ───────────────────────────────────
+  // 능력치 성장으로 단계가 오르면 해당 단계 아틀라스로 교체한다. 캐시에 있으면 즉시,
+  // 없으면 지연 로드(load.atlas) 후 적용. 전환 히치 방지로 다음 단계를 같은 배치에 선행 캐시.
+  // opts.silent: 성장 연출 없이 교체만(부팅/새 런 복구용).
+  swapCharacterStage(newStage, opts = {}) {
+    const entry = ANIM_MANIFEST[newStage];
+    if (!entry) return;
+
+    const next = ANIM_MANIFEST[newStage + 1]; // 다음 단계 선행 캐시 대상(있으면)
     const needNext = next && !this.textures.exists(next.key);
 
     if (this.textures.exists(entry.key)) {
       this._doSwap(newStage, opts.silent);
-      // 현재 단계는 이미 캐시 — 다음 단계만 백그라운드 선행 로드(완료 콜백 불필요).
       if (needNext) {
-        this.load.image(next.key, next.url);
+        this.load.atlas(next.key, next.png, next.json);
         this.load.start();
       }
       return;
     }
 
     // 현재 단계 미캐시 — 지연 로드 후 적용. 다음 단계도 같은 배치에 실어 한 번에 받는다.
-    this.load.image(entry.key, entry.url);
-    if (needNext) this.load.image(next.key, next.url);
+    this.load.atlas(entry.key, entry.png, entry.json);
+    if (needNext) this.load.atlas(next.key, next.png, next.json);
     this.load.once('complete', () => {
       if (!this.scene.isActive()) return; // 로드 중 씬이 내려갔으면 무시
       this._doSwap(newStage, opts.silent);
@@ -493,34 +616,33 @@ export default class CombatScene extends Phaser.Scene {
     this.load.start();
   }
 
-  // 단계 텍스처/origin/scale을 실제로 적용한다(텍스처 캐시 보장 후 호출).
-  // 단계마다 원본 height가 달라 표시높이(displayHeight 175)를 유지하려면 scale을 재계산한다.
+  // 단계 아틀라스를 실제 적용(캐시 보장 후 호출). 정규화로 전 단계 origin/scale 동일 →
+  // 트윈 kill(공격 복구) 완료 후 애니/프레임만 교체한다.
   _doSwap(newStage, silent = false) {
-    const entry = STAGE_MANIFEST[newStage];
-    const conf = CHARACTER_STAGES[newStage];
-    if (!entry || !conf || !this.textures.exists(entry.key)) return;
+    const entry = ANIM_MANIFEST[newStage];
+    if (!entry || !this.textures.exists(entry.key)) return;
     if (!this.character?.active) return;
 
-    // 교체 직전 실제 표시 중인 텍스처 키 — 교체 성공 후 회수 후보(characterStage가 아니라
-    // 화면에 실제로 떠 있던 키를 봐야 정확. 부팅 stage>1 복구처럼 stage값과 텍스처가 어긋나는 경우 대비).
     const prevKey = this.character.texture.key;
 
-    // 공격 스윙 중이면 in-flight 트윈이 옛 charScale로 복귀해버린다 → 깔끔히 스냅 복구 후 교체.
+    // 공격 스윙 중이면 in-flight 손 오프셋/상태가 새 단계로 새지 않게 깔끔히 복구 후 교체.
     if (this._attacking) this._forceAttackRecover();
 
-    // 새 텍스처 height로 scale 재계산 → 표시높이 동일 유지(손 무기 높이도 charDisplayH 기준 자동 반영).
-    const src = this.textures.get(entry.key).getSourceImage();
-    this.charScale = CHARACTER.displayHeight / src.height;
-    this.charDisplayH = CHARACTER.displayHeight;
+    this._ensureStageAnims(newStage); // 새 단계 애니 정의(1회)
+    this._applyCharScale(entry.key);
 
-    this.character
-      .setTexture(entry.key)
-      .setOrigin(conf.originX, conf.footOriginY) // 단계별 실측 발끝/중심 → y=groundY 그대로 발끝 안착
-      .setScale(this.charScale);
-
+    this.character.setScale(this.charScale).setOrigin(CHARACTER_ANIM.origin.x, CHARACTER_ANIM.origin.y);
     this.characterStage = newStage;
 
-    // 새 단계 적용 성공 후 직전 단계 텍스처를 VRAM에서 회수(보수적 가드).
+    // 상태 복원: 사망이면 손대지 않음, 그 외엔 walk 루프(reduced-motion은 idle 프레임 고정).
+    if (this._playerDead) {
+      /* 사망 프레임 유지 */
+    } else if (this.motionOk) {
+      this.character.play(this._animKey(newStage, 'walk'));
+    } else {
+      this.character.setTexture(entry.key, CHARACTER_ANIM.idleFrame);
+    }
+
     this._releaseStageTexture(prevKey, newStage);
 
     if (!silent) {
@@ -575,6 +697,9 @@ export default class CombatScene extends Phaser.Scene {
   // 하므로 새 런 시작 시 여기서 재생성해야 bob이 되살아난다(idleBobTween 상태 정상화).
   startIdleBob() {
     if (!this.motionOk) return;
+    // idempotent — 기존 bob을 먼저 회수해 중복 생성/유령 트윈을 막는다(재생성 경로 공용).
+    this.tweens.killTweensOf(this.character);
+    this.tweens.killTweensOf(this.shadow);
     // idle bob 저장 — 공격 시 pause/resume해 x/scale 트윈과 간섭 방지
     this.idleBobTween = this.tweens.add({
       targets: this.character,
@@ -599,6 +724,10 @@ export default class CombatScene extends Phaser.Scene {
   // 장착 무기 아이콘을 손 근처에 정적 오버레이. 텍스처는 1종만 지연 로드(전투 중 대량 X).
   // 위치는 update()에서 character를 따라가며 갱신(idle bob·런지에 함께 움직임).
   syncHandWeapon() {
+    if (!SHOW_HAND_WEAPON) {
+      if (this.weaponSprite) { this.weaponSprite.destroy(); this.weaponSprite = null; }
+      return; // 손 무기 오버레이 비활성 — 떠 있는 무기 제거(맨주먹 프레임과 충돌 방지).
+    }
     const id = GameState.equippedWeapon;
     if (id === this._handWeaponId) return;
     this._handWeaponId = id;
@@ -776,14 +905,13 @@ export default class CombatScene extends Phaser.Scene {
     if (killed) this.onEnemyKilled(enemy);
   }
 
-  // [모션] 오버헤드 찹 — 3단계 + 무기 스윙 병렬 진행:
-  //   anticipation(70ms): 캐릭터 뒤로/쪼그라들기 + 무기 머리 위로 치켜들기 (동시 시작)
-  //   chop(55ms):         캐릭터 런지 + 무기 Expo.in 가속으로 내려찍기 (동시 시작)
-  //   impact:             apply(데미지+히트스톱) + 카메라 셰이크 → 충격 동기화
-  //   recovery(150ms):    Back.out 탄성으로 무기+캐릭터 원위치
-  // 무기 position은 updateHandWeaponPos()가 매 프레임 갱신 — angle + _weaponSwingProxy.offsetY만 조작.
-  // 트윈 누수 없음: killTweensOf로 연타 보호, 모든 트윈 onComplete 체인/종료.
+  // [프레임 애니] 오버헤드 찹 — attack 프레임(attack_0 와인드업 → 1 스윙 → 2 임팩트)이 모션을 담당.
+  //   · 손 무기는 ATTACK_HAND_OFFSETS로 프레임을 따라간다(트윈 thrust 대체, _onPlayerAnimUpdate).
+  //   · 데미지/히트스톱/카메라셰이크/슬래시·스파크 VFX/넉백은 임팩트 프레임(attack_2)에 1회 동기 발화.
+  //   · 캐릭터 scale/x/angle을 흔들던 트윈은 프레임이 대신하므로 제거 — 카메라·이펙트·히트스톱만 보존.
+  // 누수 0: 재진입 가드 + 워치독 + animationcomplete 복귀(_finishAttack).
   playerAttack(enemy) {
+    // 임팩트 주스 — 임팩트 프레임에서 1회 호출. reduced-motion도 데미지는 적용(VFX/히트스톱만 생략).
     const apply = () => {
       if (!enemy || enemy.dead) return;
       const weapon = this.currentWeapon();
@@ -806,25 +934,25 @@ export default class CombatScene extends Phaser.Scene {
           // 관통 2차 타깃 — 슬래시+스파크(넉백은 연출 과밀 방지로 생략)
           if (this.motionOk) {
             const c = this._slashColorForWeapon();
-            this._spawnSlashVfx(second, c);
+            this._spawnPunchImpact(second, c);
             this._spawnImpactSparks(second, c);
           }
         }
       }
 
-      // 히트스톱 + 임팩트 VFX — 무기 chopImpactAngle 도달·런지 완료와 동기화
+      // 히트스톱 + 카메라 셰이크 + 임팩트 VFX — 프레임 임팩트(attack_2)와 동기. reduced-motion 시 전체 생략.
       if (this.motionOk) {
         this.hitStopUntil = this.time.now + MOTION.hitStopMs;
-        // 슬래시(검격 호)·스파크·적 넉백 — reduced-motion 시 이 블록 전체 생략
+        if (this.cameras?.main) this.cameras.main.shake(MOTION.chopShakeMs, MOTION.chopShakeIntensity);
         const slashColor = this._slashColorForWeapon();
-        this._spawnSlashVfx(enemy, slashColor);
+        this._spawnPunchImpact(enemy, slashColor); // 맨손 펀치(슬래시 아크 대체)
         this._spawnImpactSparks(enemy, slashColor);
         this._applyEnemyKnockback(enemy);
       }
     };
 
     if (!this.motionOk) {
-      // reduced-motion 경로(_attacking 미사용) — apply 예외가 director 루프로 전파되지 않게 격리.
+      // reduced-motion 경로 — 애니 없이 즉시 적용(apply 예외가 director 루프로 전파되지 않게 격리).
       try {
         apply();
       } catch (e) {
@@ -833,19 +961,21 @@ export default class CombatScene extends Phaser.Scene {
       return;
     }
 
-    // 재진입 가드 — 이미 스윙 중이면 새 체인을 만들지 않는다(onCombatTap의 가드와 일관).
-    // director 자동공격이 진행 중 스윙에 중첩 체인을 만들면 트윈이 꼬이므로 차단한다.
-    // (director는 다음 쿨다운에 다시 시도하므로 공격이 영구 누락되지 않는다. _attacking이
-    //  stuck되면 영구 누락되니 아래 워치독으로 복귀를 이중 보장한다.)
-    if (this._attacking) return;
+    // 재진입 가드 — 이미 스윙 중/사망이면 새 공격 안 만든다(director는 다음 쿨다운에 재시도).
+    if (this._attacking || this._playerDead) return;
+    const attackKey = this._animKey(this.characterStage, 'attack');
+    if (!this.anims.exists(attackKey)) {
+      // 아틀라스 로드 전(예외적) — 모션 없이 데미지만이라도 적용.
+      try { apply(); } catch (e) { console.error('[attack apply]', e); }
+      return;
+    }
 
-    // 공격 모션 시작 — 탭 공격이 진행 중인 스윙을 리셋·중첩하지 않도록 가드.
     this._attacking = true;
+    this._pendingAttackApply = apply;     // 임팩트 프레임에서 _onPlayerAnimUpdate가 호출
+    this._attackImpactFired = false;
 
-    // 워치독 — 스윙 총길이+200ms까지 _attacking이 안 풀리면(복귀 onComplete 누락 등)
-    // 강제로 평상복구한다. 정상 완료 시 복귀 onComplete가 이 핸들을 취소한다.
-    const swingTotalMs =
-      MOTION.chopWindupMs + MOTION.chopImpactMs + Math.max(MOTION.chopRecoveryMs, MOTION.recoveryMs);
+    // 워치독 — 공격 애니 길이+200ms까지 _attacking이 안 풀리면(complete 누락 등) 강제 복구.
+    const swingTotalMs = (3 / CHARACTER_ANIM.fps.attack) * 1000; // 3프레임
     this._attackWatchdog?.remove(false);
     this._attackWatchdog = this.time.delayedCall(swingTotalMs + 200, () => {
       this._attackWatchdog = null;
@@ -854,161 +984,33 @@ export default class CombatScene extends Phaser.Scene {
       this._forceAttackRecover();
     });
 
-    // idle bob을 일시 중지해 x/scale 트윈과 y 트윈 간섭 차단
-    this.idleBobTween?.pause();
-
-    // 무기·스윙 프록시 이전 트윈 정리 (연타 쿨다운마다 충돌 방지)
+    // 무기 잔상 — 와인드업 위치에 반투명 ghost(스피드감). onComplete destroy로 누수 0.
     if (this.weaponSprite?.active) {
-      this.tweens.killTweensOf(this.weaponSprite);
-    }
-    if (!this._weaponSwingProxy) this._weaponSwingProxy = { offsetY: 0, offsetX: 0 };
-    this.tweens.killTweensOf(this._weaponSwingProxy);
-
-    // ── 1a: 무기 치켜들기 — anticipation과 동시 시작 ─────────────────────────────
-    // Phaser CCW=음수: chopWindupAngle(-108°)로 헤드를 머리 위-뒤로 들어올림.
-    if (this.weaponSprite?.active) {
+      const trail = this.add
+        .image(this.weaponSprite.x, this.weaponSprite.y, this.weaponSprite.texture.key)
+        .setDisplaySize(this.weaponSprite.displayWidth, this.weaponSprite.displayHeight)
+        .setAngle(this.weaponSprite.angle)
+        .setOrigin(0.5)
+        .setAlpha(0.42)
+        .setDepth(this.weaponSprite.depth - 1);
       this.tweens.add({
-        targets: this.weaponSprite,
-        angle: MOTION.chopWindupAngle,
-        duration: MOTION.chopWindupMs,
-        ease: 'Quad.out',
-        onComplete: () => {
-          if (!this.weaponSprite?.active) return;
-
-          // ── 무기 잔상 — 내려찍기 직전 치켜든 위치에 반투명 ghost로 스피드감 강조 ──
-          // motionOk 안에서만 생성(reduced-motion 제외). onComplete destroy로 누수 0.
-          if (this.motionOk) {
-            const trail = this.add
-              .image(this.weaponSprite.x, this.weaponSprite.y, this.weaponSprite.texture.key)
-              .setDisplaySize(this.weaponSprite.displayWidth, this.weaponSprite.displayHeight)
-              .setAngle(this.weaponSprite.angle)
-              .setOrigin(0.5)
-              .setAlpha(0.46)
-              .setDepth(this.weaponSprite.depth - 1);
-            this.tweens.add({
-              targets: trail,
-              alpha: 0,
-              duration: 85,
-              ease: 'Quad.in',
-              onComplete: () => { if (trail.active) trail.destroy(); }
-            });
-          }
-
-          // ── 2a: 무기 내려찍기 — 런지와 동시 ──────────────────────────────────
-          // Expo.in: 처음엔 느리다가 임팩트 직전 "쾅" 가속. 총 호 160° 빠른 스윙.
-          this.tweens.add({
-            targets: this.weaponSprite,
-            angle: MOTION.chopImpactAngle,
-            duration: MOTION.chopImpactMs,
-            ease: 'Expo.in'
-          });
-        }
+        targets: trail,
+        alpha: 0,
+        duration: 110,
+        ease: 'Quad.in',
+        onComplete: () => { if (trail.active) trail.destroy(); }
       });
     }
 
-    // ── 1b: y 오프셋 치켜들기 — 손 위치를 위로 올려 찹 호 강조 ────────────────
-    this.tweens.add({
-      targets: this._weaponSwingProxy,
-      offsetY: MOTION.chopWindupOffsetY,
-      duration: MOTION.chopWindupMs,
-      ease: 'Quad.out',
-      onComplete: () => {
-        // ── 2b: y 오프셋 내려찍기 ─────────────────────────────────────────────
-        this.tweens.add({
-          targets: this._weaponSwingProxy,
-          offsetY: MOTION.chopImpactOffsetY,
-          duration: MOTION.chopImpactMs,
-          ease: 'Expo.in'
-        });
-      }
-    });
+    // 첫 프레임(attack_0) 손 오프셋은 play 시점에 직접 세팅(animationupdate는 2번째 프레임부터 발화).
+    const o0 = ATTACK_HAND_OFFSETS.attack_0;
+    if (this._weaponSwingProxy) {
+      this._weaponSwingProxy.offsetX = o0.x;
+      this._weaponSwingProxy.offsetY = o0.y;
+    }
+    if (o0.a != null && this.weaponSprite?.active) this.weaponSprite.setAngle(o0.a);
 
-    // ── 1c: 캐릭터 anticipation — 살짝 뒤로 당기며 쪼그라들기 ───────────────────
-    this.tweens.add({
-      targets: this.character,
-      x: this.playerX + MOTION.anticipationX,
-      scaleX: this.charScale * MOTION.anticipationScaleX,
-      scaleY: this.charScale * MOTION.anticipationScaleY,
-      duration: MOTION.anticipationMs,
-      ease: 'Quad.out',
-      onComplete: () => {
-        // ── 2c: 캐릭터 런지 — 내려찍는 순간에 앞으로 스트레치 + 몸 기울임 ──────
-        // leanAngle: 발 pivot(footOriginY≈0.96) 기준 CW 기울기 — "몸을 앞으로 숙이며 내려치는" 인상.
-        this.tweens.add({
-          targets: this.character,
-          x: this.playerX + MOTION.lungeX,
-          scaleX: this.charScale * MOTION.lungeScaleX,
-          scaleY: this.charScale * MOTION.lungeScaleY,
-          angle: MOTION.leanAngle,
-          duration: MOTION.lungeMs,
-          ease: 'Expo.out',
-          onComplete: () => {
-            // ── 임팩트: 데미지 + 히트스톱 + 카메라 셰이크 ──────────────────────
-            // 무기 chopImpactAngle 도달과 런지 완료가 동시 → 타격감 동기화.
-            // apply 예외가 복귀 트윈(3a/3b/3c) 스케줄링을 막지 못하게 격리한다 — 이게 막히면
-            // _attacking이 영구 true + idle bob 영구 pause로 플레이어가 굳는다(이 버그의 핵심).
-            try {
-              apply();
-            } catch (e) {
-              console.error('[attack apply]', e);
-            }
-            if (this.cameras?.main) {
-              this.cameras.main.shake(MOTION.chopShakeMs, MOTION.chopShakeIntensity);
-            }
-
-            // ── 3a: 무기 각도 복귀 (Back.out 탄성) ──────────────────────────────
-            if (this.weaponSprite?.active) {
-              this.tweens.add({
-                targets: this.weaponSprite,
-                angle: WEAPON_HAND.angle,
-                duration: MOTION.chopRecoveryMs,
-                ease: 'Back.out'
-              });
-            }
-
-            // ── 3b: y 오프셋 복귀 (0으로, Back.out) ─────────────────────────────
-            this.tweens.add({
-              targets: this._weaponSwingProxy,
-              offsetY: 0,
-              duration: MOTION.chopRecoveryMs,
-              ease: 'Back.out'
-            });
-
-            // ── 3b': 무기 리치(thrust) — 임팩트 순간 무기를 적 방향으로 순간 내질러 "닿는" 인상 ──
-            // 몸이 앞으로 안 가는 대신 무기가 찔러나가며 타격을 주도한다.
-            // 스냅(즉각 오프셋 세팅) → Back.out 탄성 복귀 = 채찍 느낌.
-            if (this._weaponSwingProxy) {
-              this._weaponSwingProxy.offsetX = MOTION.weaponThrustPx;
-              this.tweens.add({
-                targets: this._weaponSwingProxy,
-                offsetX: 0,
-                duration: MOTION.chopRecoveryMs,
-                ease: 'Back.out'
-              });
-            }
-
-            // ── 3c: 캐릭터 복귀 — 탄성 오버슈트로 원위치 (angle도 0으로) ──────
-            // Back.out(2.2): 기본값(1.70)보다 오버슈트 크게 — "살아있는 반동" 강화.
-            this.tweens.add({
-              targets: this.character,
-              x: this.playerX,
-              scaleX: this.charScale,
-              scaleY: this.charScale,
-              angle: 0,
-              duration: MOTION.recoveryMs,
-              ease: 'Back.out(2.2)',
-              onComplete: () => {
-                // 정상 복귀 — 워치독 취소 후 평상 상태로.
-                this._attackWatchdog?.remove(false);
-                this._attackWatchdog = null;
-                this.idleBobTween?.resume();
-                this._attacking = false; // 모션 종료 — 다음 탭/평타 허용
-              }
-            });
-          }
-        });
-      }
-    });
+    this.character.play(attackKey); // 1회 재생 → animationcomplete에서 walk 복귀
   }
 
   // ── 임팩트 VFX 헬퍼 ─────────────────────────────────────────────────────────
@@ -1097,6 +1099,51 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
+  // 맨손 펀치 임팩트 — 흰 충격 코어 팝 + 빠른 쇼크웨이브 링 + 전방(우) 스피드라인.
+  // 무기 오버레이 제거 후 주먹 타격감을 책임진다. 전부 생성→tween→onComplete destroy(누수 0).
+  // 호출부(playerAttack motionOk 블록)가 reduced-motion 게이트 담당.
+  _spawnPunchImpact(enemy, color) {
+    if (!enemy?.container?.active) return;
+    const depth = this.parallax.topDepth + 4; // 스파크/슬래시보다 한 단계 위
+    const h = enemy.displayHeight ?? 28;
+    const cx = enemy.container.x - h * 0.18; // 적 근접면(좌)에서 주먹이 닿는 지점
+    const cy = enemy.container.y - h * 0.5;
+
+    // 1) 충격 코어 — 흰 원 팝(짧고 강하게)
+    const core = this.add.graphics().setDepth(depth).setPosition(cx, cy).setScale(0.4);
+    core.fillStyle(0xffffff, 1);
+    core.fillCircle(0, 0, 5);
+    this.tweens.add({
+      targets: core, scaleX: 1.9, scaleY: 1.9, alpha: 0, duration: 150, ease: 'Quad.out',
+      onComplete: () => { if (core.active) core.destroy(); }
+    });
+
+    // 2) 쇼크웨이브 링 — 빠르게 확산(흰 외륜 + 속성색 내륜)
+    const ring = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+    ring.lineStyle(3, 0xffffff, 0.95);
+    ring.strokeCircle(0, 0, 7);
+    ring.lineStyle(2, color, 0.7);
+    ring.strokeCircle(0, 0, 4);
+    this.tweens.add({
+      targets: ring, scaleX: 2.8, scaleY: 2.8, alpha: 0, duration: 230, ease: 'Quad.out',
+      onComplete: () => { if (ring.active) ring.destroy(); }
+    });
+
+    // 3) 전방 스피드라인 — 주먹이 밀어내는 힘(우측으로 짧게 슬라이드+페이드)
+    const streak = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+    streak.lineStyle(2.5, 0xffffff, 0.9);
+    for (const dy of [-5, 0, 6]) {
+      streak.beginPath();
+      streak.moveTo(2, dy);
+      streak.lineTo(16, dy * 0.6);
+      streak.strokePath();
+    }
+    this.tweens.add({
+      targets: streak, x: cx + 12, alpha: 0, duration: 170, ease: 'Quad.out',
+      onComplete: () => { if (streak.active) streak.destroy(); }
+    });
+  }
+
   // 사망폭발 링(explode 행동) — 단일 Graphics 원을 스케일업+페이드. onComplete destroy로 누수 0.
   // motionOk 게이트는 호출부(onEnemyKilled ctx.spawnRing)가 책임. depth는 스파크와 동일 레이어.
   _spawnBlastRing(x, y, radius, color) {
@@ -1140,6 +1187,10 @@ export default class CombatScene extends Phaser.Scene {
   // (워치독·teardown 등) 진행 중 트윈을 정리하고 캐릭터/무기를 평상값으로 스냅한다.
   _forceAttackRecover() {
     this._attacking = false;
+    this._pendingAttackApply = null;
+    this._attackImpactFired = false;
+    this._attackWatchdog?.remove(false);
+    this._attackWatchdog = null;
     if (this.weaponSprite?.active) {
       this.tweens.killTweensOf(this.weaponSprite);
       this.weaponSprite.setAngle(WEAPON_HAND.angle);
@@ -1153,9 +1204,13 @@ export default class CombatScene extends Phaser.Scene {
       this.tweens.killTweensOf(this.character);
       this.character.x = this.playerX;
       this.character.setScale(this.charScale);
-      this.character.setAngle(0); // 런지 lean 각도 리셋
+      this.character.setAngle(0); // 잔류 각도 리셋
+      // 공격 프레임에서 빠져나와 walk 루프로 복귀(사망 중엔 손대지 않음).
+      if (this.motionOk && !this._playerDead) this._playWalk();
     }
-    this.idleBobTween?.resume();
+    // bob 복구: 위 killTweensOf(character)로 idleBobTween이 죽었으므로 resume 불가 → 재생성.
+    // (정상 공격 경로는 pause/resume을 쓰지만, 이 강제복구 경로는 kill 후라 재생성이 정답.)
+    if (!this._playerDead) this.startIdleBob();
   }
 
   // 적 처치 → 웨이브 진행 → 지역별 드롭 롤(웨이브 배율) → 코인 자동/재료 터치 줍기.
@@ -1858,21 +1913,37 @@ export default class CombatScene extends Phaser.Scene {
     const ratio = this.playerHP / this.maxHP;
     this.triggerDangerPulse(ratio <= PLAYER.dangerThreshold && this.playerHP > 0, ratio);
 
-    if (this.playerHP <= 0) this._triggerDeathFlash(() => this.onPlayerDeath());
+    if (this.playerHP <= 0) {
+      this._startPlayerDeathAnim();             // death 프레임(1회 → 마지막 프레임 정지)
+      this._triggerDeathFlash(() => this.onPlayerDeath());
+    }
   }
 
-  // [모션 훅] 피격 플래시 — tint 후 타이머 clearTint (텍스처 스왑 금지).
+  // [프레임 애니] 피격 — 붉은 tint 플래시(주스)는 보존, 몸 흔들림은 hit 프레임이 담당.
+  // 공격/사망 중엔 모션을 가로채지 않고 tint만(공격 스윙·사망 포즈 보호).
   flashPlayer() {
     this.character.setTint(0xff5050);
-    this.time.delayedCall(120, () => this.character.clearTint());
-    if (!this.motionOk) return;
-    this.character.x = this.playerX - 6;
-    this.tweens.add({
-      targets: this.character,
-      x: this.playerX,
-      duration: 180,
-      ease: 'Back.out'
-    });
+    this.time.delayedCall(120, () => { if (this.character?.active) this.character.clearTint(); });
+    if (!this.motionOk || this._attacking || this._playerDead) return;
+    const key = this._animKey(this.characterStage, 'hit');
+    if (this.anims.exists(key)) this.character.play(key); // onComplete → walk 복귀
+  }
+
+  // [프레임 애니] 사망 — death 프레임 1회 재생 후 마지막 프레임 정지(_onPlayerAnimComplete).
+  // idle bob을 멈춰 사망 포즈가 흔들리지 않게. reduced-motion은 idle 프레임 고정.
+  _startPlayerDeathAnim() {
+    this._playerDead = true;
+    this.idleBobTween?.pause();
+    if (this._attacking) this._forceAttackRecover();
+    const atlasKey = ANIM_MANIFEST[this.characterStage]?.key;
+    if (!this.motionOk) {
+      if (atlasKey && this.textures.exists(atlasKey)) {
+        this.character.setTexture(atlasKey, CHARACTER_ANIM.idleFrame);
+      }
+      return;
+    }
+    const key = this._animKey(this.characterStage, 'death');
+    if (this.anims.exists(key)) this.character.play(key);
   }
 
   // ── 속박(grab) ──────────────────────────────────────────────────────────
@@ -2706,13 +2777,15 @@ export default class CombatScene extends Phaser.Scene {
     this.playerHP = this.maxHP;
     this.updateHpBar();
     this.character.clearTint();
-    // teardown이 런지/idle 트윈을 죽여 x/y/scale/angle이 중간값으로 멈췄을 수 있으니 기준값 복원
+    this._playerDead = false; // 사망 플래그 해제 — 아래 swap/walk가 다시 살아나게(순서 중요)
+    // teardown이 idle 트윈을 죽여 x/y/scale/angle이 중간값으로 멈췄을 수 있으니 기준값 복원
     this.character.setPosition(this.playerX, this.groundY).setScale(this.charScale).setAngle(0);
     this.shadow.setScale(1).setAlpha(0.35); // 그림자 bob 기준값 복원
-    this.startIdleBob(); // bob 재생성 — 이후 playerAttack의 pause/resume가 정상 동작
-    // 새 런 단계 복구 — startNewRun이 런 스냅샷을 리셋했으면 stage1(맨손). 텍스처/origin/scale 복원.
+    this.startIdleBob(); // bob 재생성
+    // 새 런 단계 복구 — startNewRun이 런 스냅샷을 리셋했으면 stage1(맨손). 아틀라스/scale + walk 복원.
     this.characterStage = deriveStage(GameState);
-    this.swapCharacterStage(this.characterStage, { silent: true });
+    this.swapCharacterStage(this.characterStage, { silent: true }); // _doSwap이 walk 루프 재생
+    if (this.motionOk && !this._attacking) this._playWalk(); // swap이 미적용(미캐시 로드 대기)일 때 보강
     this.syncResourceHud();
     // 새 런 — startNewRun이 waveIndex=0(downtown)으로 리셋했으니 배경도 패럴랙스로 복귀.
     this.currentRegionId = getRegion(GameState.waveIndex).id;

@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { IMAGE_MANIFEST, WEAPON_MANIFEST } from '../assets/manifest.js';
+import { IMAGE_MANIFEST, WEAPON_MANIFEST, ANIM_MANIFEST } from '../assets/manifest.js';
 import { LOGICAL, RENDER_SCALE } from '../constants/layout.js';
 import { PALETTE } from '../constants/palette.js';
 import { PIXEL_FONT, BODY_FONT, PRELOAD_FONTS, installCrispText } from '../constants/fonts.js';
@@ -18,6 +18,11 @@ export default class PreloadScene extends Phaser.Scene {
     this.drawLoadingUI();
 
     IMAGE_MANIFEST.forEach(({ key, url }) => this.load.image(key, url));
+
+    // 주인공 프레임 애니 — stage_01 아틀라스만 선행로드(전투 첫 프레임부터 walk 루프 보장).
+    // 2~8단계는 단계 상승 시 CombatScene이 지연 로드(현재/다음만 유지).
+    const a1 = ANIM_MANIFEST[1];
+    this.load.atlas(a1.key, a1.png, a1.json);
 
     this.load.on('progress', (p) => {
       this.barFill.width = Math.floor((LOGICAL.width * 0.6) * p);
