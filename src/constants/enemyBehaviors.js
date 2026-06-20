@@ -46,10 +46,21 @@ export const ENEMY_BEHAVIORS = {
 
   // 사망 독웅덩이(poolOnDeath) — 죽은 자리에 지속 피해 존을 남긴다(seam D).
   // 존 생성/틱/회수는 전부 ctx.spawnHazard(scene 소유, draw-once 프리미티브)로 위임.
+  // (현재 미사용 — putrifier는 poisonThrow로 전환. 향후 적용 적이 있으면 재사용.)
   poolOnDeath: {
     onDeath(enemy, ctx) {
       const b = enemy.def.behavior;
       ctx.spawnHazard(enemy.container.x, b.radius, b.dmg, b.durationMs);
+    }
+  },
+
+  // 독 투척(poisonThrow) — 죽으며 독 글롭을 플레이어에게 던진다(seam D). 착탄 시 ticks회 독 DoT 후 종료.
+  // 고정 위치 게임이라 바닥 웅덩이(회피 불가)보다 경계 있는 투척 피해가 공정. 투사체/DoT는 scene이 소유.
+  poisonThrow: {
+    onDeath(enemy, ctx) {
+      const b = enemy.def.behavior;
+      const fromY = enemy.container.y - (enemy.displayHeight ?? 100) * 0.55; // 몸 상단에서 던짐
+      ctx.throwPoison(enemy.container.x, fromY, b.dmg, b.ticks);
     }
   },
 

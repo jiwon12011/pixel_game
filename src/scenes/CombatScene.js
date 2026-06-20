@@ -67,9 +67,16 @@ const DMG_POOL_MAX = 24;
 // 무기 정체성은 HUD 장착표시 + 속성별 타격 VFX로 전달. 되살리려면 true.
 const SHOW_HAND_WEAPON = false;
 
-// 난이도 — 적이 주는 피해 전역 배율(takePlayerDamage 단일 통로). 1.0=기본, <1=쉬움.
-// 더 쉽게/어렵게는 이 값만 조정. (웨이브 HP 증가 곡선은 combat.js waveParams에서 별도 완화)
-const DIFFICULTY_DMG_MULT = 0.82;
+// 난이도 곡선 — 적 피해 배율을 웨이브에 따라 보간(초반 쉽게 → 후반 원래대로).
+//   wave 0: EASY_START(0.60, 40%↓) → wave RAMP_WAVES(14)에서 1.0(기본)으로 선형 회복.
+//   이후 웨이브는 1.0 고정(원래 난이도). takePlayerDamage 단일 통로에서 곱해진다(독 투척 포함).
+const DIFFICULTY_EASY_START = 0.6;
+const DIFFICULTY_RAMP_WAVES = 14;
+function difficultyDmgMult(wave) {
+  if (wave >= DIFFICULTY_RAMP_WAVES) return 1.0;
+  const t = Math.max(0, wave) / DIFFICULTY_RAMP_WAVES; // 0→1
+  return DIFFICULTY_EASY_START + (1.0 - DIFFICULTY_EASY_START) * t;
+}
 
 // 몸 프레임은 거의 정지(생성 결과)라 공격 "휘두름"은 이 오프셋 스윙이 carry한다. 작아진 캐릭터(118px)에 맞춘 값.
 const ATTACK_HAND_OFFSETS = {
@@ -410,6 +417,7 @@ export default class CombatScene extends Phaser.Scene {
     this.playerBindUntil = 0;
     this._clearBindTether();
     this._clearHazards();
+    this._playerPoison = null; // 투척 독 DoT 리셋(다음 전투/런으로 안 새게)
     // 킬 콤보 리셋 — 콤보 상태/예약/HUD를 새 전투·런으로 안 넘김.
     this._resetCombo(true);
     this._comboGradeBumpPending = false; // 등급상승 예약도 다음 런으로 안 새게(콤보×10 직후 사망 케이스).
@@ -1259,7 +1267,9 @@ export default class CombatScene extends Phaser.Scene {
         spawnSparks: (e, c) => { if (this.motionOk) this._spawnImpactSparks(e, c); },
         spawnRing: (x, y, r, c) => { if (this.motionOk) this._spawnBlastRing(x, y, r, c); },
         // 독웅덩이 — VFX가 아니라 게임플레이 존이라 reduced-motion에도 생성(펄스만 내부에서 분기).
-        spawnHazard: (hx, r, dmg, dur) => this.spawnHazard(hx, r, dmg, dur)
+        spawnHazard: (hx, r, dmg, dur) => this.spawnHazard(hx, r, dmg, dur),
+        // 독 투척 — 적이 죽으며 독 글롭을 플레이어에게 던짐. 도달 시 플레이어 N틱 독 DoT(경계 있음).
+        throwPoison: (fromX, fromY, dmg, ticks) => this.throwPoison(fromX, fromY, dmg, ticks)
       });
     }
 
@@ -1928,8 +1938,8 @@ export default class CombatScene extends Phaser.Scene {
       this.showShieldBlock();
       return;
     }
-    // 방어력 피해감소 적용(적→플레이어). def*4%, 캡 20%. + 전역 난이도 배율.
-    const dmg = Math.max(1, Math.round(amount * defenseMultiplier(GameState.stats.def) * DIFFICULTY_DMG_MULT));
+    // 방어력 피해감소 적용(적→플레이어). def*4%, 캡 20%. + 난이도 곡선(초반 쉽게→후반 원래대로).
+    const dmg = Math.max(1, Math.round(amount * defenseMultiplier(GameState.stats.def) * difficultyDmgMult(GameState.waveIndex)));
     this.playerHP = Math.max(0, this.playerHP - dmg);
     GameState.waveHitFlag = true; // 무피해 클리어(CLEAN SWEEP) 무효화 — 실제 피해를 입은 웨이브로 기록
     this.updateHpBar();
@@ -2019,6 +2029,70 @@ export default class CombatScene extends Phaser.Scene {
         repeat: -1
       });
     }
+  }
+
+  // 독 투척 — 적 사망 위치에서 플레이어로 독 글롭이 포물선으로 날아간다. 도달 시 플레이어에 독 DoT(ticks틱).
+  // 위치 기반 웅덩이의 '회피 불가' 문제를 피하려 투사체→경계 있는 DoT로 단순화("두 번 맞고 끝").
+  // reduced-motion: 연출(글롭/포물선) 생략하고 즉시 DoT만 적용(공정성 유지).
+  throwPoison(fromX, fromY, dmg, ticks) {
+    const tx = this.playerX;
+    const ty = this.groundY - this.charDisplayH * 0.5;
+    const apply = () => this.applyPlayerPoison(dmg, ticks);
+    if (!this.motionOk) { apply(); return; }
+    const glob = this.add
+      .ellipse(fromX, fromY, 12, 12, COMBAT_COLORS.toxicGlow, 0.95)
+      .setStrokeStyle(1.5, COMBAT_COLORS.hazard, 0.7)
+      .setDepth(this.parallax.topDepth + 4)
+      .setBlendMode(Phaser.BlendModes.ADD);
+    // 포물선 — x는 선형 보간, y는 위로 솟았다 떨어지는 아치(onUpdate에서 sin).
+    const dur = 420;
+    const arc = { t: 0 };
+    this.tweens.add({
+      targets: arc,
+      t: 1,
+      duration: dur,
+      ease: 'Linear',
+      onUpdate: () => {
+        const t = arc.t;
+        glob.x = fromX + (tx - fromX) * t;
+        glob.y = fromY + (ty - fromY) * t - Math.sin(t * Math.PI) * 40; // 40px 아치
+      },
+      onComplete: () => {
+        if (glob.active) glob.destroy();
+        // 착탄 스플랫 — 플레이어 발치에 짧은 녹색 퍼프(생성→tween→destroy).
+        const splat = this.add
+          .ellipse(tx, ty, 18, 10, COMBAT_COLORS.toxicGlow, 0.8)
+          .setDepth(this.parallax.topDepth + 4)
+          .setBlendMode(Phaser.BlendModes.ADD);
+        this.tweens.add({
+          targets: splat, scaleX: 2, scaleY: 2, alpha: 0, duration: 240, ease: 'Quad.out',
+          onComplete: () => { if (splat.active) splat.destroy(); }
+        });
+        apply();
+      }
+    });
+  }
+
+  // 플레이어 독 DoT — 단일 슬롯, ticks회 틱 후 종료. per-enemy식 타이머 없이 update 루프가 now 비교로 구동.
+  // 재적용은 풀 리셋(겹침=갱신). teardown에서 _playerPoison 리셋.
+  applyPlayerPoison(dmg, ticks) {
+    this._playerPoison = {
+      dmg,
+      ticksLeft: ticks,
+      nextAt: this.time.now + 420 // 첫 틱까지 짧은 유예(착탄 직후 즉발 0)
+    };
+  }
+
+  // update()에서 매 프레임 호출 — 독 DoT 틱 처리(scene.time.now 비교, 새 타이머 0).
+  _updatePlayerPoison(now) {
+    const p = this._playerPoison;
+    if (!p || p.ticksLeft <= 0 || this.playerHP <= 0) return;
+    if (now < p.nextAt) return;
+    this.takePlayerDamage(p.dmg); // 방어/방벽/사망 처리 재사용
+    if (!this.combatReady) { this._playerPoison = null; return; } // 사망→teardown 재진입 가드
+    p.ticksLeft -= 1;
+    p.nextAt = now + 620; // 틱 간격
+    if (p.ticksLeft <= 0) this._playerPoison = null;
   }
 
   _clearBindTether() {
@@ -3845,6 +3919,9 @@ export default class CombatScene extends Phaser.Scene {
 
     // 독웅덩이 — 만료 청소는 항상, 피해 틱은 전투 활성 + 오버레이 없을 때만(정지 중 무피해).
     this._updateHazards(time, this.combatReady && !this.upgradeLayer && !this.deathLayer);
+
+    // 플레이어 독 DoT(투척 착탄) — 전투 활성 + 오버레이 없을 때만 틱(정지 중 무피해).
+    if (this.combatReady && !this.upgradeLayer && !this.deathLayer) this._updatePlayerPoison(time);
 
     // 속박 테더 — 봉쇄 만료 시 시각 신호 회수(scene.time.now 비교, 새 타이머 0).
     if (this._bindTether && time >= this.playerBindUntil) this._clearBindTether();

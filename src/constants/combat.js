@@ -100,8 +100,8 @@ export const ENEMY_TYPES = {
     behavior: { type: 'guard', reduce: 0.6 }
   },
   // 부패체 — 독내성 학습체(TOXIC 채널). 빠른 편, 무리지어 전파 시너지.
-  // 사망 시 독웅덩이를 남긴다(poolOnDeath) — 멜리에서 잡으면 발밑에 지속 피해 존이 깔리므로
-  // "접근 전에 처치"가 정답이 되는 압박형. 존 시스템은 scene이 소유(draw-once + 동시 3개 캡).
+  // 사망 시 독 글롭을 플레이어에게 투척(poisonThrow) — 착탄하면 ticks회 독 DoT 후 종료.
+  // 고정 위치 게임이라 바닥 웅덩이(회피 불가)보다 "경계 있는 투척 피해"가 공정. dmg×ticks가 총 피해.
   putrifier: {
     maxHP: 90,
     speed: 28,
@@ -109,7 +109,7 @@ export const ENEMY_TYPES = {
     attackCooldown: 950,
     displayHeight: 128,
     contactRange: 78,
-    behavior: { type: 'poolOnDeath', radius: 80, dmg: 5, durationMs: 3500 }
+    behavior: { type: 'poisonThrow', dmg: 6, ticks: 2 }
   }
 };
 
