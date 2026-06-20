@@ -67,6 +67,10 @@ const DMG_POOL_MAX = 24;
 // 무기 정체성은 HUD 장착표시 + 속성별 타격 VFX로 전달. 되살리려면 true.
 const SHOW_HAND_WEAPON = false;
 
+// 난이도 — 적이 주는 피해 전역 배율(takePlayerDamage 단일 통로). 1.0=기본, <1=쉬움.
+// 더 쉽게/어렵게는 이 값만 조정. (웨이브 HP 증가 곡선은 combat.js waveParams에서 별도 완화)
+const DIFFICULTY_DMG_MULT = 0.82;
+
 // 몸 프레임은 거의 정지(생성 결과)라 공격 "휘두름"은 이 오프셋 스윙이 carry한다. 작아진 캐릭터(118px)에 맞춘 값.
 const ATTACK_HAND_OFFSETS = {
   attack_0: { x: -6, y: -24, a: -92 }, // 와인드업 — 무기 머리 위-뒤로 치켜듦
@@ -99,6 +103,7 @@ export default class CombatScene extends Phaser.Scene {
 
   create() {
     installCrispText(this); // 모든 텍스트 2배 해상도 + 정수좌표(한글/HUD 숫자 선명화)
+    this._ensureGlowTexture(); // 적 VFX 공유 소프트 글로우 텍스처 1회 생성(textures.exists 가드)
     this.motionOk = !prefersReducedMotion();
     this.combatReady = false;
     this.dangerOn = false;
@@ -893,6 +898,7 @@ export default class CombatScene extends Phaser.Scene {
     const regionDotMult = getRegionCombatBonus(this.currentRegionId, dotAttr);
     if (regionDotMult !== 1) dmg = Math.max(1, Math.round(dmg * regionDotMult));
     const killed = enemy.takeDamage(dmg, { fromDot: true });
+    enemy.spawnDotPuff?.(); // DoT 틱 퍼프 — 숫자만 뚝뚝 뜨지 않고 연출의 일부로 보이게
     // DoT 숫자는 작게 + 색 구분(화염 주황 / 독 청록)으로 직접타와 시각 분리, 스팸 억제.
     this.spawnDamageNumber(
       enemy.container.x,
@@ -1142,6 +1148,32 @@ export default class CombatScene extends Phaser.Scene {
       targets: streak, x: cx + 12, alpha: 0, duration: 170, ease: 'Quad.out',
       onComplete: () => { if (streak.active) streak.destroy(); }
     });
+  }
+
+  // 적 VFX 공유 소프트 글로우 텍스처 생성 — 씬 create() 1회 호출. textures.exists 가드.
+  // 64×64 흰 원형 소프트 그라데이션 → Enemy가 tint/scale/ADD 블렌드로 감전/독/화염 표현.
+  // 공유 텍스처라 적 destroy 시 지우지 말 것 — 씬 shutdown 시점에만 Phaser가 자동 해제.
+  _ensureGlowTexture() {
+    const KEY = 'fx-glow';
+    if (this.textures.exists(KEY)) return;
+    const SIZE = 64;
+    const C    = SIZE / 2; // 32
+    const g    = this.make.graphics({ x: 0, y: 0, add: false });
+    // 다단 fillCircle: 외곽(옅음)→중심(불투명) 레이어로 소프트 그라데이션
+    const layers = [
+      [C,        0.04],
+      [C * 0.80, 0.09],
+      [C * 0.62, 0.18],
+      [C * 0.44, 0.34],
+      [C * 0.28, 0.58],
+      [C * 0.14, 0.84],
+    ];
+    for (const [r, a] of layers) {
+      g.fillStyle(0xffffff, a);
+      g.fillCircle(C, C, r);
+    }
+    g.generateTexture(KEY, SIZE, SIZE);
+    g.destroy();
   }
 
   // 사망폭발 링(explode 행동) — 단일 Graphics 원을 스케일업+페이드. onComplete destroy로 누수 0.
@@ -1896,8 +1928,8 @@ export default class CombatScene extends Phaser.Scene {
       this.showShieldBlock();
       return;
     }
-    // 방어력 피해감소 적용(적→플레이어). def*4%, 캡 20%.
-    const dmg = Math.max(1, Math.round(amount * defenseMultiplier(GameState.stats.def)));
+    // 방어력 피해감소 적용(적→플레이어). def*4%, 캡 20%. + 전역 난이도 배율.
+    const dmg = Math.max(1, Math.round(amount * defenseMultiplier(GameState.stats.def) * DIFFICULTY_DMG_MULT));
     this.playerHP = Math.max(0, this.playerHP - dmg);
     GameState.waveHitFlag = true; // 무피해 클리어(CLEAN SWEEP) 무효화 — 실제 피해를 입은 웨이브로 기록
     this.updateHpBar();
@@ -1957,15 +1989,25 @@ export default class CombatScene extends Phaser.Scene {
 
   _showBindTether(grabberX) {
     this._clearBindTether();
-    const py = this.groundY - this.charDisplayH * 0.45;
+    // 속박 = 그래버가 플레이어를 당기는 "사슬". 납작한 직선이 레이저처럼 보이던 문제 →
+    // 살짝 처진 곡선(2차 베지어) 위에 사슬 마디(작은 원)를 깔아 물리적 당김으로 읽히게.
+    const py = this.groundY - this.charDisplayH * 0.5; // 몸 중앙 높이(바닥 직선 회피)
     const gx = grabberX != null ? grabberX : this.playerX + 70;
-    // draw-once — 보라 테더 라인 + 양끝 마디. 이후 alpha 펄스 tween만(재그리기 0).
+    const x0 = this.playerX, x2 = gx;
+    const sag = 9; // 중앙 처짐(px) — 팽팽한 직선이 아니라 끌려가는 느낌
+    const cx = (x0 + x2) / 2, cy = py + sag; // 베지어 제어점(아래로)
     const g = this.add.graphics().setDepth(this.parallax.topDepth + 2);
-    g.lineStyle(2, 0xc060ff, 0.92);
-    g.lineBetween(this.playerX, py, gx, py);
-    g.fillStyle(0xc060ff, 1);
-    g.fillCircle(this.playerX, py, 3);
-    g.fillCircle(gx, py, 3);
+    const N = 9;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const mt = 1 - t;
+      const x = mt * mt * x0 + 2 * mt * t * cx + t * t * x2;
+      const y = mt * mt * py + 2 * mt * t * cy + t * t * py;
+      // 마디 — 끝(앵커)은 크게, 중간 사슬은 작게. 홀짝으로 밝기 교차해 사슬 질감.
+      const isAnchor = i === 0 || i === N;
+      g.fillStyle(0xc060ff, isAnchor ? 1 : (i % 2 ? 0.9 : 0.55));
+      g.fillCircle(x, y, isAnchor ? 3.5 : 2);
+    }
     this._bindTether = g;
     if (this.motionOk) {
       this._bindTetherTween = this.tweens.add({

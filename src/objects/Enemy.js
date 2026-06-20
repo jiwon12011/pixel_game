@@ -1,5 +1,12 @@
+import Phaser from 'phaser';
 import { ENEMY_TYPES, COMBAT_COLORS, MOTION, ELITE } from '../constants/combat.js';
 import { ENEMY_BEHAVIORS } from '../constants/enemyBehaviors.js';
+
+// 의사난수 sin-hash O(1) — 감전 명멸/위성 배치/화염 엠버 공용.
+const _shockHash = (n) => { const v = Math.sin(n + 1.0) * 43758.5453; return v - Math.floor(v); };
+
+// 적 VFX 공유 소프트 글로우 텍스처 키 — CombatScene.create()에서 1회 생성, 재생성 금지.
+const GFX_GLOW_KEY = 'fx-glow';
 
 // 적 1마리 = 스프라이트 + 그림자 + 머리 위 HP바를 묶은 Container.
 // 이동/피격/사망을 자체 메서드로 캡슐화하고, motion-engineer가 얹을 훅을
@@ -75,6 +82,20 @@ export default class Enemy {
     this._dotTintLocked = false; // flashHit 진행 중 true → dot onUpdate가 tint 건드리지 않음
     this._dotTintSteps = null;   // 사전계산 보간색 배열(onUpdate에서 Math 연산 없이 룩업)
     this._dotStepIdx = -1;       // 마지막 적용 색 인덱스 — 동일 인덱스면 setTint 생략. -1=강제 재적용
+
+    // VFX — 사전렌더 소프트 글로우 텍스처 기반(절차 Graphics 폐기).
+    // 'fx-glow' 64×64(CombatScene.create 1회 생성) → tint/scale/alpha/ADD 블렌드 조합.
+    // 감전(shock)·DoT 스프라이트셋을 독립 운용 → 두 상태 동시 활성 가능.
+    this._shockSprites = null;   // { core, halo, sats[], list[], lastFlash, _staticSet }
+    this._dotSprites   = null;   // { type, [fog|pool], [bubbles[]|tongues[]], ember?, list[] }
+    this._puffSprite   = null;   // DoT 틱 퍼프 전용 스프라이트 (dotSprites 생성 시 함께 할당)
+    this._shockAlpha   = 0;      // 감전 글로우 페이드 진행값 (0→1 진입, 1→0 퇴장)
+    this._dotPuffUntil = 0;      // (하위호환 유지 — 직접 사용 안 함)
+    this._dotPuffColor = 0;      // (하위호환 유지)
+    // 30fps 스로틀 기준 타임스탬프 — 스폰 위상 분산으로 동시 다수 스폰 시 첫 틱 몰림 방지.
+    this._vfxLastDraw  = scene.time.now + Math.random() * 33;
+    this._vfxSeed      = Math.floor(Math.random() * 997); // 적별 독립 난수 시드(명멸/엠버)
+    this._shockSatEpoch = -1; // 위성 재배치 기준 에포크
 
     // 엘리트는 살짝 큰 실루엣 — 스케일·표시높이를 함께 키워 HP바/VFX 앵커가 같이 따라간다.
     const eliteScale = elite ? ELITE.scale : 1;
@@ -176,6 +197,9 @@ export default class Enemy {
       if (this.shakeActive) this._tickShake(dtMs);
       if (this.flashActive) this._tickFlash(dtMs);
     }
+    // VFX 갱신 — container 자식이라 syncPosition 전후 무관(좌표는 container가 소유)
+    // reduced-motion 포함: 정적 글로우도 최초 1회 setAlpha가 필요하므로 motionOk 가드 제거
+    if (this._hasAnyVfx()) this._tickVfx(this.scene.time.now);
     this.syncPosition();
   }
 
@@ -217,6 +241,7 @@ export default class Enemy {
     this.shockCdMult = cdMult;
     this.shockUntil = this.scene.time.now + durationMs;
     this.shocked = true;
+    this._ensureShockSprites(); // 글로우 스프라이트 준비(reduced-motion도 정적 글로우 제공)
     this.restoreTint();
     this._updateStatusPip();
   }
@@ -248,6 +273,7 @@ export default class Enemy {
     this.dotNextTickAt = now + tickMs; // 첫 틱은 한 주기 뒤(즉발 0)
     this.dotExpiresAt = now + durationMs;
     this.dotNoSpread = noSpread;
+    this._ensureDotSprites(type); // 글로우 스프라이트 준비(reduced-motion도 정적 글로우 제공)
     this.setDotTint();
     this._updateStatusPip();
   }
@@ -439,6 +465,7 @@ export default class Enemy {
     this._clearTimers(); // 대기 중인 flashHit 타이머 정리(이미 dead 가드라 무해하지만 유령 제거)
     this._dotPulseTween?.stop(); // DoT 맥동 트윈 정리 — helper가 별도 객체라 killTweensOf(this) 불충분
     this._dotPulseTween = null;
+    this._destroyAllVfx();        // 감전·DoT 글로우 스프라이트 즉시 회수
     this.hpBg.setVisible(false);
     this.hpFill.setVisible(false);
     this.statusPip.setVisible(false);
@@ -500,12 +527,311 @@ export default class Enemy {
     this._clearTimers();
     this._dotPulseTween?.stop(); // DoT 맥동 트윈 — helper 기반이라 killTweensOf(this) 불충분
     this._dotPulseTween = null;
+    this._destroyAllVfx();        // VFX 글로우 스프라이트 회수 — container.destroy() 전에 명시 정리
     this.bobTween?.stop();
     this.scene.tweens.killTweensOf(this);
     if (this.container && !this.removed) {
       this.scene.tweens.killTweensOf(this.container);
       this.removed = true;
       this.container.destroy();
+    }
+  }
+
+  // ── VFX 내부 유틸 ─────────────────────────────────────────────────────────
+  // 사전렌더 소프트 글로우 텍스처('fx-glow') 기반 스프라이트 세트.
+  // 감전/DoT 독립 운용 → 동시 활성 가능. per-enemy TimerEvent 0, 매 프레임 Graphics redraw 0.
+  // ADD 블렌드 + tint + scale 조합으로 3종 효과 — 텍스처 1벌 공유.
+
+  /** 활성 VFX 스프라이트 있으면 true — update에서 _tickVfx 호출 여부 판단. */
+  _hasAnyVfx() {
+    return this._shockSprites !== null || this._dotSprites !== null;
+  }
+
+  /** 감전 글로우 스프라이트셋 생성 (이미 있으면 재사용). reduced-motion도 정적 글로우 제공. */
+  _ensureShockSprites() {
+    if (this._shockSprites) return;
+    if (!this.scene.textures.exists(GFX_GLOW_KEY)) return;
+    const h    = this.displayHeight;
+    const list = [];
+    const make = (x, y, tint, sx, sy, a) => {
+      const s = this.scene.add.image(x, y, GFX_GLOW_KEY)
+        .setOrigin(0.5).setTint(tint).setScale(sx, sy)
+        .setAlpha(a).setBlendMode(Phaser.BlendModes.ADD);
+      this.container.add(s);
+      list.push(s);
+      return s;
+    };
+    // 헤일로: 몸폭(h*0.15)+24px, 최대 50px (몸엣지+24px 하드캡)
+    const haloR = Math.min(h * 0.15 + 24, 50);
+    const core  = make(0, -h * 0.5, 0xFFFFFF, 0.5,         0.5,         0);
+    const halo  = make(0, -h * 0.5, 0x00FFEE, haloR / 32,  haloR / 32,  0);
+    // 위성 스파크 — 보라/인디고(0x6644FF). 청록 헤일로와 색상환에서 분리돼 작은 화면서 또렷,
+    // 감전+화염 동시 ADD에도 하얗게 안 뜸(designer 게이트).
+    const sats  = [
+      make(0, -h * 0.5, 0x6644FF, 0.27, 0.27, 0),
+      make(0, -h * 0.5, 0x6644FF, 0.27, 0.27, 0),
+      make(0, -h * 0.5, 0x6644FF, 0.27, 0.27, 0),
+    ];
+    this.container.bringToTop(this.hpBg);
+    this.container.bringToTop(this.hpFill);
+    this.container.bringToTop(this.statusPip);
+    this._shockSprites  = { core, halo, sats, list, lastFlash: false, _staticSet: false };
+    this._shockAlpha    = 0;
+    this._shockSatEpoch = -1;
+  }
+
+  /** 감전 글로우 스프라이트셋 즉시 회수. */
+  _destroyShockSprites() {
+    if (!this._shockSprites) return;
+    for (const s of this._shockSprites.list) { if (s?.active) s.destroy(); }
+    this._shockSprites = null;
+    this._shockAlpha   = 0;
+  }
+
+  /** DoT(독/화염) 글로우 스프라이트셋 생성. 타입 변경 시 기존 파괴 후 재생성. */
+  _ensureDotSprites(type) {
+    if (this._dotSprites?.type === type) return;
+    this._destroyDotSprites();
+    if (!this.scene.textures.exists(GFX_GLOW_KEY)) return;
+    const h    = this.displayHeight;
+    const list = [];
+    const make = (x, y, tint, sx, sy, a) => {
+      const s = this.scene.add.image(x, y, GFX_GLOW_KEY)
+        .setOrigin(0.5).setTint(tint).setScale(sx, sy)
+        .setAlpha(a).setBlendMode(Phaser.BlendModes.ADD);
+      this.container.add(s);
+      list.push(s);
+      return s;
+    };
+    let sprites;
+    if (type === 'toxic') {
+      sprites = {
+        type,
+        fog:     make(0, -10,       0x33FF55, 1.1,  0.35, 0.18),
+        bubbles: [
+          make(-5, -h * 0.3, 0xAAFF00, 0.1, 0.1, 0),
+          make( 5, -h * 0.3, 0xAAFF00, 0.1, 0.1, 0),
+        ]
+      };
+    } else { // burn
+      sprites = {
+        type,
+        pool:    make(0,  -10,       0xFF5500, 1.1,  0.45, 0.5),
+        tongues: [
+          make(-9, -h * 0.25, 0xFFAA00, 0.14, 0.35, 0),
+          make( 0, -h * 0.25, 0xFFAA00, 0.14, 0.40, 0),
+          make( 9, -h * 0.25, 0xFFAA00, 0.14, 0.35, 0),
+        ],
+        ember: make(0, -h * 0.5, 0xFFEE88, 0.07, 0.07, 0),
+      };
+    }
+    const puff   = make(0, -h * 0.5, 0xFFFFFF, 0.22, 0.22, 0);
+    this._puffSprite = puff;
+    this.container.bringToTop(this.hpBg);
+    this.container.bringToTop(this.hpFill);
+    this.container.bringToTop(this.statusPip);
+    this._dotSprites = { ...sprites, list };
+  }
+
+  /** DoT 글로우 스프라이트셋 즉시 회수. */
+  _destroyDotSprites() {
+    if (!this._dotSprites) return;
+    if (this._puffSprite?.active) this.scene?.tweens?.killTweensOf(this._puffSprite);
+    for (const s of this._dotSprites.list) { if (s?.active) s.destroy(); }
+    this._dotSprites   = null;
+    this._puffSprite   = null;
+    this._dotPuffUntil = 0;
+  }
+
+  /** 감전+DoT 스프라이트 양쪽 일괄 회수 — die/destroy 전용. */
+  _destroyAllVfx() {
+    this._destroyShockSprites();
+    this._destroyDotSprites();
+  }
+
+  // DoT 틱 퍼프 발화 — CombatScene.applyDotTick 시점에 호출. 200ms 스케일업+페이드 글로우 팝.
+  // _puffSprite는 _ensureDotSprites 시점에 사전 할당 — 매 틱 create/destroy 없이 위치/alpha만 갱신.
+  spawnDotPuff() {
+    if (this.dead || !this.motionOk) return;
+    if (!this._puffSprite?.active) return;
+    const color = this.dotType === 'burn' ? 0xFF6600 : 0x44FF88;
+    const h = this.displayHeight;
+    this._puffSprite
+      .setTint(color)
+      .setPosition(0, -h * 0.5)
+      .setScale(0.2, 0.2)
+      .setAlpha(0.85);
+    this.scene.tweens.killTweensOf(this._puffSprite);
+    this.scene.tweens.add({
+      targets: this._puffSprite,
+      scaleX: 0.65,
+      scaleY: 0.65,
+      alpha: 0,
+      duration: 200,
+      ease: 'Quad.out'
+    });
+  }
+
+  // VFX 갱신 — 30fps 스로틀(~33ms 간격). 스프라이트 alpha/위치 갱신만(Graphics redraw 0).
+  // per-enemy TimerEvent 0 — scene.time.now 기반 의사난수 진행.
+  _tickVfx(now) {
+    if (!this._hasAnyVfx()) return;
+    if (now - this._vfxLastDraw < 33) return; // 30fps 스로틀
+    this._vfxLastDraw = now;
+
+    // ── 감전 VFX ──────────────────────────────────────────────────────────
+    if (this._shockSprites) {
+      if (this.shocked) {
+        this._shockAlpha = Math.min(1, this._shockAlpha + 0.4);
+        this._tickShockVfx(now);
+      } else {
+        // 페이드아웃 → 0 도달 시 스프라이트 자동 회수
+        this._shockAlpha = Math.max(0, this._shockAlpha - 0.25);
+        const sp = this._shockSprites;
+        sp.core.setAlpha(this._shockAlpha * 0.9);
+        sp.halo.setAlpha(this._shockAlpha * 0.5);
+        for (const s of sp.sats) s.setAlpha(this._shockAlpha * 0.7);
+        if (this._shockAlpha <= 0) this._destroyShockSprites();
+      }
+    }
+
+    // ── DoT VFX ───────────────────────────────────────────────────────────
+    if (this._dotSprites) {
+      if (!this.dotType) {
+        this._destroyDotSprites(); // clearDot 후 지연 회수
+      } else if (this.dotType === 'toxic') {
+        this._tickToxicVfx(now);
+      } else if (this.dotType === 'burn') {
+        this._tickBurnVfx(now);
+      }
+    }
+  }
+
+  // 감전 명멸 — 40ms 에포크 단위 의사난수(~28% ON) → 죽어가는 형광등 리듬.
+  // ON 전환 시 위성 위치 재배치(매 플래시마다 랜덤). reduced-motion: 정적 은은한 글로우.
+  _tickShockVfx(now) {
+    const sp = this._shockSprites;
+    if (!sp) return;
+    const h  = this.displayHeight;
+
+    // prefers-reduced-motion: 정적 글로우(최초 1회 세팅)
+    if (!this.motionOk) {
+      if (!sp._staticSet) {
+        sp.core.setAlpha(0.35);
+        sp.halo.setAlpha(0.12);
+        for (const s of sp.sats) s.setAlpha(0);
+        sp._staticSet = true;
+      }
+      return;
+    }
+
+    // 불규칙 명멸: 40ms 에포크, hash>0.72 → ON(~28% 확률), 적별 _vfxSeed로 독립 위상
+    const epochN  = Math.floor(now / 40);
+    const flashOn = _shockHash(epochN * 7 + 13 + this._vfxSeed) > 0.72;
+    const a       = this._shockAlpha;
+
+    // ON 전환 시(이전 OFF→이번 ON): 위성 위치 즉각 랜덤 재배치
+    if (flashOn && !sp.lastFlash) {
+      const satEpochN = Math.floor(now / 120); // 120ms 단위(너무 빠른 춤 방지)
+      if (satEpochN !== this._shockSatEpoch) {
+        this._shockSatEpoch = satEpochN;
+        const rx = h * 0.18;  // 몸폭 추정 반경
+        const ry = h * 0.44;  // 세로 분산 범위
+        for (let i = 0; i < sp.sats.length; i++) {
+          const ang = _shockHash(satEpochN * 31 + i * 7 + this._vfxSeed) * Math.PI * 2;
+          sp.sats[i].setPosition(
+            Math.cos(ang) * rx,
+            -h * 0.5 + Math.sin(ang) * ry
+          );
+        }
+      }
+    }
+    sp.lastFlash = flashOn;
+
+    // 즉각 컷(사이 완전 꺼짐 — 죽어가는 형광등)
+    sp.core.setAlpha(flashOn ? a * 0.95 : 0);
+    sp.halo.setAlpha(flashOn ? a * 0.45 : 0);
+    for (const s of sp.sats) s.setAlpha(flashOn ? a * 0.70 : 0);
+  }
+
+  // 독 VFX: 발밑 안개(2.5s 사인 호흡) + 기포 2개 상승-팝. prefers-reduced-motion: 안개 정적.
+  _tickToxicVfx(now) {
+    const sp = this._dotSprites;
+    if (!sp) return;
+    const h = this.displayHeight;
+
+    if (!this.motionOk) {
+      sp.fog.setAlpha(0.18);
+      for (const b of sp.bubbles) b.setAlpha(0);
+      return;
+    }
+
+    // 안개 호흡: alpha 0.12↔0.28, 주기 2.5s
+    const fogAlpha = 0.12 + (Math.sin((now / 2500) * Math.PI * 2) + 1) * 0.5 * 0.16;
+    sp.fog.setAlpha(fogAlpha);
+
+    // 기포 상승 → 가슴 이상 금지(maxRise ≤ 35px)
+    const maxRise = Math.min(h * 0.55, 35);
+    for (let i = 0; i < sp.bubbles.length; i++) {
+      const bub   = sp.bubbles[i];
+      const phase = ((now / 1800 + i * 0.5) % 1.0);
+      if (phase > 0.85) {
+        bub.setAlpha(Math.max(0, (1 - phase) / 0.15 * 0.35));
+      } else {
+        const py = -10 - phase * maxRise;
+        const px = (i === 0 ? -3 : 3) + Math.sin(now / 300 + i * 1.5) * 3;
+        const sc = 0.07 + Math.sin(phase * Math.PI) * 0.05;
+        bub.setPosition(px, py).setScale(sc, sc).setAlpha(Math.sin(phase * Math.PI) * 0.55);
+      }
+    }
+  }
+
+  // 화염 VFX: 발밑 풀 맥동 + 혀 3개 상승(120° 오프셋) + 엠버 간헐 점멸.
+  // prefers-reduced-motion: 풀 글로우만 정적.
+  _tickBurnVfx(now) {
+    const sp = this._dotSprites;
+    if (!sp) return;
+    const h = this.displayHeight;
+
+    if (!this.motionOk) {
+      sp.pool.setScale(1.1, 0.45).setAlpha(0.45);
+      for (const t of sp.tongues) t.setAlpha(0);
+      sp.ember.setAlpha(0);
+      return;
+    }
+
+    // 풀 글로우 맥동: scaleX 1.0↔1.15, ~200ms
+    const poolPhase = Math.sin((now / 200) * Math.PI * 2);
+    sp.pool
+      .setScale(1.1 * (1.0 + poolPhase * 0.075), 0.45 * (1.0 + poolPhase * 0.04))
+      .setAlpha(0.5 + poolPhase * 0.15);
+
+    // 불꽃 혀: 3개, 120° 위상 오프셋, 0.28~0.34s 주기 상승-리셋
+    const maxRise = h * 0.55; // 몸 높이 60% 이하 하드캡
+    for (let i = 0; i < sp.tongues.length; i++) {
+      const period = 280 + i * 30;
+      const phase  = ((now + i * (period / 3)) % period) / period;
+      const ta     = Math.sin(phase * Math.PI);
+      sp.tongues[i]
+        .setPosition((i - 1) * 9, -16 - phase * maxRise)
+        .setScale(0.13, 0.28 + ta * 0.15)
+        .setAlpha(ta * 0.65)
+        .setTint(phase > 0.65 ? 0xFF2200 : 0xFFAA00);
+    }
+
+    // 엠버 간헐 점멸 — 150ms 에포크, ~45% 확률 ON
+    const ee  = Math.floor(now / 150);
+    const eOn = _shockHash(ee * 11 + 3 + this._vfxSeed) > 0.55;
+    if (eOn) {
+      sp.ember
+        .setPosition(
+          (_shockHash(ee * 7 + this._vfxSeed) - 0.5) * 18,
+          -h * (0.3 + _shockHash(ee * 5 + this._vfxSeed) * 0.35)
+        )
+        .setScale(0.06, 0.06)
+        .setAlpha(0.75);
+    } else {
+      sp.ember.setAlpha(0);
     }
   }
 }

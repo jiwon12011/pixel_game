@@ -414,6 +414,7 @@ export default class HubScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setInteractive({ useHandCursor: true });
     headerHit.on('pointerdown', () => {
+      if (this._modalWeaponId) return; // 모달 떠 있으면 무시(버튼 탭 누출 방지)
       if (GameState.equippedWeapon) this.openWeaponModal(GameState.equippedWeapon);
     });
     this.layer(headerHit);
@@ -466,6 +467,7 @@ export default class HubScene extends Phaser.Scene {
     // 같은 탭의 pointerup이 cellBg에 도달해 모달이 즉시 재오픈되는 버그를 피한다.
     // 드래그(스크롤)로 끌었으면 오발 진입 방지.
     cellBg.setInteractive({ useHandCursor: true }).on('pointerdown', () => {
+      if (this._modalWeaponId) return; // 모달이 떠 있으면 뒤 행 탭 무시(강화 버튼 탭이 다른 무기 모달 여는 누출 방지)
       if (this.scroll?.drag?.moved) return;
       this.openWeaponModal(id);
     });
@@ -644,10 +646,11 @@ export default class HubScene extends Phaser.Scene {
     // ★중요: 마스크는 렌더링만 클리핑하고 입력 히트영역은 그대로라, 뷰 밖 행이 탭바·헤더 위에서
     //   탭을 가로챈다. 무기행은 cellBg(행 전체)가 클릭 타깃이므로 cellBg도 반드시 컬링한다.
     // 행에 버튼이 여럿이면(영구탭) btnBgs로, 단일이면 btnBg로 컬링.
-    const half = s.rowH / 2;
     s.rows.forEach((r) => {
       const screenY = r.cy + s.y;
-      const visible = screenY >= s.listTop - half && screenY <= s.listBottom + half;
+      // 행 중심이 마스크 밴드(listTop~listBottom) 안일 때만 입력 허용. ±half 슬랙을 두면
+      // 헤더/탭바 뒤로 가려져(마스크로 안 보이는) 행이 그 자리 탭을 가로채 다른 무기 상세가 열린다.
+      const visible = screenY >= s.listTop && screenY <= s.listBottom;
       if (r.cellBg && r.cellBg.input) r.cellBg.input.enabled = visible;
       const bgs = r.btnBgs || (r.btnBg ? [r.btnBg] : []);
       for (const bg of bgs) if (bg && bg.input) bg.input.enabled = visible && bg.visible;
@@ -796,17 +799,18 @@ export default class HubScene extends Phaser.Scene {
       .setInteractive();
     scrim.on('pointerup', () => this.closeWeaponModal());
     m.add(scrim);
+    mw.scrim = scrim;
 
     // 패널 — 컨테이너를 패널 좌상단으로 옮겨 내부 좌표를 패널 로컬로 단순화.
     const panel = this.add.container(PX, PY);
     m.add(panel);
-    panel.add(
-      this.add
+    const panelRect = this.add
         .rectangle(0, 0, PW, 248, 0x1a1008, 1)
         .setOrigin(0, 0)
         .setStrokeStyle(1, 0x3d2b1a, 1)
-        .setInteractive() // 패널 내부 클릭이 스크림(닫기)으로 새지 않게 흡수
-    );
+        .setInteractive(); // 패널 내부 클릭이 스크림(닫기)으로 새지 않게 흡수
+    mw.panelRect = panelRect;
+    panel.add(panelRect);
 
     // 아이콘(48px, 중앙 상단)
     mw.icon = this.add.image(160, 36, 'pipe_wrench').setOrigin(0.5);
@@ -895,13 +899,26 @@ export default class HubScene extends Phaser.Scene {
     const closeBtn = this.makeButton(160, 240, 200, 22, () => this.closeWeaponModal(), panel);
     closeBtn.set(true, '닫기', 0x3d2b1a, C.gold);
 
+    // 모달의 모든 인터랙티브 영역 — 숨김 시 입력까지 끈다(Phaser: 컨테이너 setVisible(false)여도
+    // 자식 히트영역은 입력을 계속 받는 버그 → 다른 탭에서 모달 버튼 위치 탭이 새던 문제 차단).
+    mw.inputs = [scrim, panelRect, mw.enhBtn.bg, mw.equipBtn.bg, closeBtn.bg];
+
     this._modalWidgets = mw;
+    this._setModalInputEnabled(false); // 생성 직후엔 숨김 상태 → 입력 끔
+  }
+
+  // 모달 인터랙티브 영역 입력 일괄 토글(setVisible와 함께 호출해 잔존 히트영역 제거).
+  _setModalInputEnabled(on) {
+    const mw = this._modalWidgets;
+    if (!mw?.inputs) return;
+    for (const o of mw.inputs) if (o?.input) o.input.enabled = on;
   }
 
   openWeaponModal(id) {
     this.ensureWeaponModal();
     this._modalWeaponId = id;
     this.weaponModal.setVisible(true);
+    this._setModalInputEnabled(true);
     this.refreshWeaponModal(id);
     SFX.play('tab');
   }
@@ -995,7 +1012,10 @@ export default class HubScene extends Phaser.Scene {
   }
 
   closeWeaponModal() {
-    if (this.weaponModal) this.weaponModal.setVisible(false);
+    if (this.weaponModal) {
+      this.weaponModal.setVisible(false);
+      this._setModalInputEnabled(false); // 숨김과 동시에 히트영역 입력 차단(다른 탭 누출 방지)
+    }
     this._modalWeaponId = null;
   }
 

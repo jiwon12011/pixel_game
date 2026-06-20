@@ -141,7 +141,7 @@ export const DROP = {
 // 공식은 ideator 확정값. cap으로 후반 난이도가 발산하지 않게 묶는다.
 export function waveParams(w) {
   return {
-    hpMult: Math.min(2.8, 1.0 + 0.12 * Math.max(0, w - 2)),
+    hpMult: Math.min(2.5, 1.0 + 0.10 * Math.max(0, w - 2)),
     intervalMin: Math.max(700, 1400 - w * 40),
     intervalMax: Math.max(1100, 2600 - w * 80),
     maxAlive: Math.min(6, 3 + Math.floor(w / 4)),
