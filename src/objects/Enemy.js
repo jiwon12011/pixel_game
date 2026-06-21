@@ -52,7 +52,10 @@ export default class Enemy {
     this.groundY = groundY;
     this.shakeX = 0;
     this.shakeY = 0;
-    this.bobY = 0;     // 이동 중 상하 bob offset — syncPosition에서 합산
+    // 이동 중 상하 bob offset — syncPosition에서 합산. motionOk면 +amplitude에서 시작해 yoyo로
+    // +3↔-3 대칭 진동(0에서 시작하면 0↔-3이라 위로만 떠 공중 부유로 보임 — ANIM-02).
+    // reduced-motion은 bob 트윈이 없으므로 0(지면)에 고정.
+    this.bobY = motionOk ? MOTION.bobAmplitude : 0;
 
     // 피격 셰이크/플래시 — TimerEvent 없이 update의 상태기반 클럭으로 진행(perf: 타격당 delayedCall 0).
     this.shakeActive = false; // 셰이크 계단 진행 중 → _tickShake가 매 프레임 shakeX 갱신
@@ -377,8 +380,11 @@ export default class Enemy {
         const c = this.dotType === 'burn' ? COMBAT_COLORS.burnGlow : COMBAT_COLORS.toxicGlow;
         this.sprite.setTint(c);
       }
+    } else if (this._enraged) {
+      // 보스 분노: 주황-붉은 엠버 tint 상시 — 분노가 끝까지 시각적으로 유지(guard 강철빛보다 우선).
+      this.sprite.setTint(COMBAT_COLORS.burnGlow);
     } else if (this.guarding) {
-      // 정면방어: 강철빛 tint — 감전·DoT 다음 우선순위(상태 없을 때 상시 노출).
+      // 정면방어: 강철빛 tint — 감전·DoT·분노 다음 우선순위(상태 없을 때 상시 노출).
       this.sprite.setTint(COMBAT_COLORS.guard);
     } else if (this.isElite) {
       // 엘리트: 앰버 골드 tint — guard보다 낮은 우선순위(엘리트 guard면 guard색이 이김). 평상시 노출.
@@ -725,33 +731,31 @@ export default class Enemy {
       return;
     }
 
-    // 불규칙 명멸: 40ms 에포크, hash>0.72 → ON(~28% 확률), 적별 _vfxSeed로 독립 위상
-    const epochN  = Math.floor(now / 40);
-    const flashOn = _shockHash(epochN * 7 + 13 + this._vfxSeed) > 0.72;
-    const a       = this._shockAlpha;
+    // [A11Y-02] 광과민성 완화 — 기존 40ms 하드 on/off 컷(≈24회/초 명멸, 밝기 급변)을
+    // sine-alpha 맥동으로 대체한다. 밝기가 부드럽게 오르내려 휘도 변화 빈도가 ~1Hz로 떨어진다
+    // (광과민 발작 가이드 3회/초 미만). "죽어가는 형광등"의 불규칙 질감은 위성을 120ms 에포크마다
+    // 재배치하는 공간적 흔들림으로 유지(밝기 급변 없이).
+    const a = this._shockAlpha;
+    // 0.12↔1.0 맥동, 주기 ~940ms(now/150). 적별 _vfxSeed로 위상 분산 → 동시 다수도 동기 깜빡임 없음.
+    const pulse = 0.12 + 0.44 * (Math.sin(now / 150 + this._vfxSeed) + 1);
 
-    // ON 전환 시(이전 OFF→이번 ON): 위성 위치 즉각 랜덤 재배치
-    if (flashOn && !sp.lastFlash) {
-      const satEpochN = Math.floor(now / 120); // 120ms 단위(너무 빠른 춤 방지)
-      if (satEpochN !== this._shockSatEpoch) {
-        this._shockSatEpoch = satEpochN;
-        const rx = h * 0.18;  // 몸폭 추정 반경
-        const ry = h * 0.44;  // 세로 분산 범위
-        for (let i = 0; i < sp.sats.length; i++) {
-          const ang = _shockHash(satEpochN * 31 + i * 7 + this._vfxSeed) * Math.PI * 2;
-          sp.sats[i].setPosition(
-            Math.cos(ang) * rx,
-            -h * 0.5 + Math.sin(ang) * ry
-          );
-        }
+    const satEpochN = Math.floor(now / 120); // 120ms 단위 위성 재배치(너무 빠른 춤 방지)
+    if (satEpochN !== this._shockSatEpoch) {
+      this._shockSatEpoch = satEpochN;
+      const rx = h * 0.18;  // 몸폭 추정 반경
+      const ry = h * 0.44;  // 세로 분산 범위
+      for (let i = 0; i < sp.sats.length; i++) {
+        const ang = _shockHash(satEpochN * 31 + i * 7 + this._vfxSeed) * Math.PI * 2;
+        sp.sats[i].setPosition(
+          Math.cos(ang) * rx,
+          -h * 0.5 + Math.sin(ang) * ry
+        );
       }
     }
-    sp.lastFlash = flashOn;
 
-    // 즉각 컷(사이 완전 꺼짐 — 죽어가는 형광등)
-    sp.core.setAlpha(flashOn ? a * 0.95 : 0);
-    sp.halo.setAlpha(flashOn ? a * 0.45 : 0);
-    for (const s of sp.sats) s.setAlpha(flashOn ? a * 0.70 : 0);
+    sp.core.setAlpha(a * 0.95 * pulse);
+    sp.halo.setAlpha(a * 0.45 * pulse);
+    for (const s of sp.sats) s.setAlpha(a * 0.70 * pulse);
   }
 
   // 독 VFX: 발밑 안개(2.5s 사인 호흡) + 기포 2개 상승-팝. prefers-reduced-motion: 안개 정적.
@@ -807,7 +811,7 @@ export default class Enemy {
       .setAlpha(0.5 + poolPhase * 0.15);
 
     // 불꽃 혀: 3개, 120° 위상 오프셋, 0.28~0.34s 주기 상승-리셋
-    const maxRise = h * 0.55; // 몸 높이 60% 이하 하드캡
+    const maxRise = h * 0.55; // 몸 높이 55% 이하 하드캡
     for (let i = 0; i < sp.tongues.length; i++) {
       const period = 280 + i * 30;
       const phase  = ((now + i * (period / 3)) % period) / period;

@@ -325,7 +325,7 @@ export default class HubScene extends Phaser.Scene {
       this.layer(valueTxt, incrTxt);
 
       // 업그레이드 버튼(비용 표시)
-      const btn = this.makeButton(CONTENT.x + CONTENT.w - 42, cy, 78, 26, () => {
+      const btn = this.makeButton(CONTENT.x + CONTENT.w - 42, cy, 78, 28, () => {
         const lvl = GameState.statLevels[stat];
         if (def.maxLevel != null && lvl >= def.maxLevel) return;
         const cost = upgradeCost(stat, lvl + 1);
@@ -503,7 +503,7 @@ export default class HubScene extends Phaser.Scene {
 
     // 이름 — 행 상단(cy-10). 한글은 BODY_FONT(픽셀폰트 한글 자소 뭉갬), 제목 톤(금).
     const nameTxt = this.add
-      .text(CONTENT.x + 52, cy - 10, recipe.name, {
+      .text(CONTENT.x + 52, cy - 11, recipe.name, {
         fontFamily: BODY_FONT,
         fontSize: '13px',
         color: C.gold
@@ -515,12 +515,13 @@ export default class HubScene extends Phaser.Scene {
     // 능력 설명 1줄 — 이름 아래(cy+7). 속성색(FIRE 주황·TOXIC 청록). 작은 회색이 뭉개져
     // 이름과 같은 13px + 밝은 색으로(11px·어두운 회색은 한글 가독 floor 아래).
     const abilityTxt = this.add
-      .text(CONTENT.x + 52, cy + 7, recipe.ability, {
+      .text(CONTENT.x + 52, cy + 9, recipe.ability, {
         fontFamily: BODY_FONT,
         fontSize: '13px',
         color: ATTR_COLOR[recipe.attrTag] || C.body
       })
       .setOrigin(0, 0.5);
+    abilityTxt.setShadow(1, 1, '#000000', 0, false, true); // 이름과 톤 일관 — 어두운 배경 가독
     list.add(abilityTxt);
 
     // (행 별점 제거 — 강화 단계는 우측 상태 라벨 ★N + 상세 팝업 별점으로 표시.)
@@ -840,13 +841,13 @@ export default class HubScene extends Phaser.Scene {
     mw.ability.setShadow(1, 1, '#000000', 0, false, true);
     panel.add(mw.ability);
 
-    // 현재 스탯 / 다음 스탯
+    // 현재 스탯 / 다음 스탯 — 한글("강화 시: 공격…")이 섞여 13px BODY로(픽셀 11px 자소 뭉갬). 색 유지.
     mw.curStat = this.add
-      .text(16, 125, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.gold })
+      .text(16, 125, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.gold })
       .setOrigin(0, 0.5);
     mw.curStat.setShadow(1, 1, '#000000', 0, false, true);
     mw.nextStat = this.add
-      .text(16, 141, '', { fontFamily: PIXEL_FONT, fontSize: '11px', color: C.toxic })
+      .text(16, 141, '', { fontFamily: BODY_FONT, fontSize: '13px', color: C.toxic })
       .setOrigin(0, 0.5);
     mw.nextStat.setShadow(1, 1, '#000000', 0, false, true);
     panel.add([mw.curStat, mw.nextStat]);
@@ -878,7 +879,7 @@ export default class HubScene extends Phaser.Scene {
 
     // 강화 / 장착 / 닫기 버튼 — 버튼은 현재 모달 id(this._modalWeaponId)로 동작(1세트 재사용).
     // 좌측 버튼은 미보유=제작 / 보유=강화로 한 버튼이 두 동작을 겸한다(refresh가 라벨 토글).
-    mw.enhBtn = this.makeButton(80, 214, 100, 26, () => {
+    mw.enhBtn = this.makeButton(80, 214, 100, 28, () => {
       const id = this._modalWeaponId;
       if (!id) return;
       const recipe = WEAPON_RECIPES[id];
@@ -892,7 +893,7 @@ export default class HubScene extends Phaser.Scene {
         }
       }
     }, panel);
-    mw.equipBtn = this.makeButton(240, 214, 100, 26, () => {
+    mw.equipBtn = this.makeButton(240, 214, 100, 28, () => {
       const id = this._modalWeaponId;
       if (id && GameState.equipWeapon(id)) SFX.play('tab');
     }, panel);

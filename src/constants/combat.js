@@ -14,6 +14,14 @@ export const SPAWN_WEIGHTS = {
   tank_mutant: 1
 };
 
+// 타입별 최소 등장 웨이브 — 이 웨이브 미만이면 spawn에서 기본 압박형(sludge/flanker)으로 대체.
+// 초반 메카닉 과부하 방지: grabber(속박)·putrifier(독투척)는 기본 전투를 익힌 뒤 등장.
+// 여기 없는 타입은 제한 없음(0). CombatDirector.spawn이 getWaveIndex()와 비교한다.
+export const SPAWN_MIN_WAVE = {
+  grabber: 2,
+  putrifier: 3
+};
+
 // ── 엘리트 적 (Phase 2) ────────────────────────────────────────────────
 // 일반 스폰에서 낮은 확률로 "엘리트"를 주입한다 — 별도 클래스 없이 Enemy에 elite 플래그만.
 // HP 대폭↑ + 구분 tint(amber) + 살짝 큰 스케일 + 처치 코인 보너스. behavior는 적 native 유지.
@@ -141,7 +149,8 @@ export const DROP = {
 // 공식은 ideator 확정값. cap으로 후반 난이도가 발산하지 않게 묶는다.
 export function waveParams(w) {
   return {
-    hpMult: Math.min(2.5, 1.0 + 0.10 * Math.max(0, w - 2)),
+    // wave0부터 완만 상승(+6%/wave) + 천장 4.0. 후반 단조(2.5 캡)를 제거해 진행할수록 계속 단단해지게.
+    hpMult: Math.min(4.0, 1.0 + 0.06 * Math.max(0, w)),
     intervalMin: Math.max(700, 1400 - w * 40),
     intervalMax: Math.max(1100, 2600 - w * 80),
     maxAlive: Math.min(6, 3 + Math.floor(w / 4)),
@@ -149,13 +158,13 @@ export function waveParams(w) {
   };
 }
 
-// ── 보스 (첫 보스 wave 5, 이후 7웨이브마다 — isBossWave/BOSS_INTERVAL_WAVES) ──
+// ── 보스 (첫 보스 wave 7, 이후 7웨이브마다 — isBossWave/BOSS_INTERVAL_WAVES) ──
 // 일반 적과 같은 Enemy 인프라를 재사용한다(typeKey=보스키 + cfg.def/maxHP 주입).
 // HP가 매우 높고·느리고·크다(스케일은 displayHeight로 산출 — 일반 적 108~145의 ~1.7배).
 // 등장 순서: 회차 0=colossus, 1=herald, 2=colossus … (bossKeyForWave가 회차 홀짝으로 번갈아 반환).
 //   reward — 처치 보상. 희귀 재료(grade≥2) 2~3종 확정 + 코인. 코인은 보스 깊이로 가산(scene).
 export const BOSS_TYPES = {
-  // 콜로서스 — 느리지만 압도적으로 단단·묵직한 일격. 첫 보스(웨이브 5, 회차 0).
+  // 콜로서스 — 느리지만 압도적으로 단단·묵직한 일격. 첫 보스(웨이브 7, 회차 0).
   colossus_boss: {
     maxHP: 760,
     speed: 15,
@@ -165,11 +174,11 @@ export const BOSS_TYPES = {
     contactRange: 118,
     name: '콜로서스',
     // 페이즈 — HP가 임계 아래로 떨어지면 1회씩 발동(updateBossHpBar의 _phaseIdx 가드).
-    // 0.66: 방어 자세(guard) + 가속. 0.5 분노(_enrageBoss)와 공존(분노가 더 깊은 임계).
-    phases: [{ atRatio: 0.66, action: 'guardUp' }],
+    // 0.70: 방어 자세(guard) + 가속. 0.40 분노(_enrageBoss)와 공존(분노가 더 깊은 임계 — 페이즈 간격 확보).
+    phases: [{ atRatio: 0.70, action: 'guardUp' }],
     reward: { coins: 140, materials: { scrap_metal_plate: 3, old_battery_cell: 2, broken_circuit_board: 1 } }
   },
-  // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 12, 회차 1).
+  // 헤럴드 — 콜로서스보다 빠르고 덜 단단하지만 잦은 타격. 두 번째 보스(웨이브 14, 회차 1).
   the_herald_boss: {
     maxHP: 600,
     speed: 23,
@@ -185,9 +194,10 @@ export const BOSS_TYPES = {
 };
 
 // ── 보스 등장 주기 (단일 출처) ─────────────────────────────────────────────
-// 첫 보스 wave 5, 이후 7웨이브마다 → 5, 12, 19, 26, 33 …
+// 첫 보스 wave 7, 이후 7웨이브마다 → 7, 14, 21, 28, 35 …
+// (5→7: 엘리트를 보스보다 먼저 2~3웨이브 경험하게 해 초반 스파이크 완화)
 // 보스 종류/티어는 "웨이브 번호"가 아니라 "몇 번째 보스인가"(occurrence index)로 파생한다.
-export const FIRST_BOSS_WAVE = 5;
+export const FIRST_BOSS_WAVE = 7;
 export const BOSS_INTERVAL_WAVES = 7;
 
 // w가 보스 웨이브인가.
@@ -210,9 +220,9 @@ export function bossKeyForWave(w) {
 
 // 보스 등장 웨이브 → { key, def, tier, maxHP, damage }.
 // HP는 보스 베이스에 (waveParams.hpMult + 0.6·tier)를 곱해 잡몹 강화 곡선과 결을 맞추되,
-// hpMult가 캡(2.8)에 닿은 뒤에도 깊은 보스가 계속 단단해지도록 tier 가산항을 더한다.
+// hpMult가 캡(4.0)에 닿은 뒤에도 깊은 보스가 계속 단단해지도록 tier 가산항을 더한다.
 // damage는 tier마다 +12%로 완만히(즉사 방지). tier = 보스 회차(첫 보스=0).
-// ※ 첫 보스가 wave 5라 waveParams(5).hpMult가 낮아 자연히 약함(과한 HP벽 방지).
+// ※ 첫 보스가 wave 7라 waveParams(7).hpMult가 낮아 자연히 약함(과한 HP벽 방지).
 export function bossStatsForWave(w) {
   const key = bossKeyForWave(w);
   const base = BOSS_TYPES[key];

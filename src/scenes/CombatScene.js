@@ -96,7 +96,7 @@ const HAZARD_FIRST_TICK_MS = 350; // 첫 틱까지 유예(즉발 0)
 // ── 킬 콤보(런/전투 한정) ──────────────────────────────────────────────
 // 마지막 킬로부터 COMBO_WINDOW_MS 이내 연속 처치마다 카운터 +1(scene.time.now 비교, per-kill 타이머 0).
 // COMBO_GRADE_STEP 배수 돌파마다 "다음 드롭 1개 grade +1" 보너스를 예약. 창 만료 시 update에서 리셋.
-const COMBO_WINDOW_MS = 3000;   // 다음 킬까지 허용 간격(넘으면 콤보 소멸)
+const COMBO_WINDOW_MS = 4000;   // 다음 킬까지 허용 간격(넘으면 콤보 소멸) — 체감 강화 위해 3000→4000
 const COMBO_GRADE_STEP = 10;    // 이 배수(10·20…) 돌파 시 등급 상승 드롭 1회 부여
 const COMBO_HUD_MIN = 2;        // 이 수치 이상부터 HUD 노출(1킬마다 깜빡이는 노이즈 방지)
 
@@ -418,6 +418,7 @@ export default class CombatScene extends Phaser.Scene {
     this._clearBindTether();
     this._clearHazards();
     this._playerPoison = null; // 투척 독 DoT 리셋(다음 전투/런으로 안 새게)
+    this._clearPoisonFx();     // 비행 중이던 독 글롭/스플랫 회수(런 종료 잔상 방지)
     // 킬 콤보 리셋 — 콤보 상태/예약/HUD를 새 전투·런으로 안 넘김.
     this._resetCombo(true);
     this._comboGradeBumpPending = false; // 등급상승 예약도 다음 런으로 안 새게(콤보×10 직후 사망 케이스).
@@ -426,6 +427,7 @@ export default class CombatScene extends Phaser.Scene {
     this._threatWarnText?.destroy();
     this._threatWarnText = null;
     // 보스 상태 정리 — clearAll이 보스 Enemy를 파괴하므로 여기선 플래그/HP바만 즉시 회수.
+    this.boss?._enrageTimer?.remove(); // 분노 defer 타이머 회수(유령 콜백 방지)
     this._bossActive = false;
     this.boss = null;
     this.bossWaveIndex = 0;
@@ -439,6 +441,8 @@ export default class CombatScene extends Phaser.Scene {
     this._attackImpactFired = false;
     this._attackWatchdog?.remove(false); // 스윙 워치독 취소 — teardown 후 발화해 캐릭터를 건드리지 않게
     this._attackWatchdog = null;
+    this._flashTintTimer?.remove(); // 피격 tint 복원 예약 취소 — teardown 후 파괴된 character 참조 방지
+    this._flashTintTimer = null;
 
     // 주인공 트윈 정리 — 사망이 playerAttack 런지 중간에 나면 3단계 체인/onComplete
     // (idleBobTween.resume 등)이 teardown 후에도 발화해 새 런 bob 상태가 꼬인다.
@@ -596,6 +600,7 @@ export default class CombatScene extends Phaser.Scene {
       this._weaponSwingProxy.offsetY = 0;
     }
     if (this.weaponSprite?.active) this.weaponSprite.setAngle(WEAPON_HAND.angle);
+    this.idleBobTween?.resume(); // 공격 종료 — pause했던 idle bob 복귀(둘 다 존재 가드)
     if (!this._playerDead && this.motionOk) this._playWalk();
   }
 
@@ -985,6 +990,7 @@ export default class CombatScene extends Phaser.Scene {
     }
 
     this._attacking = true;
+    this.idleBobTween?.pause(); // 공격 중 idle bob 정지 — 타격감 보존(복귀 시 _finishAttack에서 resume)
     this._pendingAttackApply = apply;     // 임팩트 프레임에서 _onPlayerAnimUpdate가 호출
     this._attackImpactFired = false;
 
@@ -1040,38 +1046,6 @@ export default class CombatScene extends Phaser.Scene {
       case 'PIERCE': return 0x88ccff;                 // 하늘청 (관통)
       default:       return 0xfff0d0;                 // PHYSICAL — 따뜻한 흰/금
     }
-  }
-
-  // 검격 호(슬래시) VFX — 임팩트 지점에 두꺼운 호 선(흰+속성 색)을 그려
-  // 스케일업+페이드로 소멸. 무기 스윙 방향(-100°→+48°)과 정렬.
-  _spawnSlashVfx(enemy, color) {
-    if (!enemy?.container?.active) return;
-    const depth = this.parallax.topDepth + 3;
-    // 슬래시 중심: 적 상체(발에서 절반 높이 위)
-    const cx = enemy.container.x - 5;
-    const cy = enemy.container.y - (enemy.displayHeight ?? 28) * 0.55;
-    const startRad = Phaser.Math.DegToRad(MOTION.slashStartDeg);
-    const endRad   = Phaser.Math.DegToRad(MOTION.slashEndDeg);
-
-    const g = this.add.graphics().setDepth(depth).setPosition(cx, cy);
-
-    // 외선 — 흰색 굵게 (타격 에너지 질감). 4.5px로 더 또렷하게.
-    g.lineStyle(4.5, 0xffffff, 0.94);
-    g.strokeArc(0, 0, MOTION.slashOuterR, startRad, endRad, false);
-
-    // 내선 — 속성 색 (무기 원소 질감). 2.5px로 강화.
-    g.lineStyle(2.5, color, 0.88);
-    g.strokeArc(0, 0, MOTION.slashInnerR, startRad + 0.18, endRad - 0.12, false);
-
-    this.tweens.add({
-      targets: g,
-      scaleX: MOTION.slashScaleTo,
-      scaleY: MOTION.slashScaleTo,
-      alpha: 0,
-      duration: MOTION.slashDurationMs,
-      ease: 'Quad.out',
-      onComplete: () => { if (g.active) g.destroy(); }
-    });
   }
 
   // 방사형 스파크 VFX — 타격 지점 중심에서 짧은 선분들이 방사 후 페이드.
@@ -1508,7 +1482,7 @@ export default class CombatScene extends Phaser.Scene {
     const x = LOGICAL.width - 8;
     const y = COMBAT_H * 0.22;
     const t = this.add
-      .text(x, y, text, { fontFamily: BODY_FONT, fontSize: '12px', color })
+      .text(x, y, text, { fontFamily: BODY_FONT, fontSize: '13px', color })
       .setOrigin(1, 0.5)
       .setDepth(73);
     t.setShadow(1, 1, '#000000', 0, false, true);
@@ -1573,6 +1547,7 @@ export default class CombatScene extends Phaser.Scene {
         onDeath: () => this.onBossDefeated()
       });
       this.boss._phaseIdx = 0; // 페이즈 전이 진행 인덱스(정수 가드) — 새 보스마다 0에서 시작(누수 0)
+      this.boss._baseSpeed = this.boss.speed; // 분노/guardUp speed 배율의 기준(중복곱 방지)
       this.createBossHpBar(stats);
       this.showBossBanner(stats);
     });
@@ -1704,23 +1679,37 @@ export default class CombatScene extends Phaser.Scene {
     this.bossHpBar.fill.width = this.bossHpBar.barW * ratio;
     // 보스 페이즈 — phases 배열을 임계 교차 시 순서대로 1회씩 발동(_phaseIdx 정수 가드).
     // 0.66 페이즈가 0.5 분노보다 먼저 걸린다(둘은 독립 — 분노는 아래 별도 가드).
+    let phaseEnteredThisFrame = false;
     const phases = boss.def.phases;
     if (phases && boss._phaseIdx < phases.length && !boss.dead) {
       const next = phases[boss._phaseIdx];
       if (ratio <= next.atRatio) {
         boss._phaseIdx += 1;
         this._enterBossPhase(boss, next);
+        phaseEnteredThisFrame = true;
       }
     }
-    // 분노 페이즈 — HP 50% 아래로 처음 떨어지면 1회 가속(_enraged 가드). boss는 teardown 시 파괴돼 누수 0.
-    if (!boss._enraged && ratio < 0.5 && !boss.dead) this._enrageBoss(boss);
+    // 분노 페이즈 — HP 40% 아래로 처음 떨어지면 1회 가속(_enraged 가드). boss는 teardown 시 파괴돼 누수 0.
+    // _enrageScheduled — defer 중 매 프레임 재예약 방지. _enraged는 실제 효과 적용(_enrageBoss) 시점에 셋.
+    if (!boss._enraged && !boss._enrageScheduled && ratio < 0.40 && !boss.dead) {
+      if (phaseEnteredThisFrame) {
+        // guardUp/소환 페이즈와 같은 프레임에 분노가 겹치면 셰이크/토스트/SFX가 뭉침 → ~300ms 미뤄 연출 분리.
+        // (이 300ms 동안엔 _enraged=false라 guardUp 강철빛 tint가 유지되고, 이후 분노 엠버로 전환된다.)
+        boss._enrageScheduled = true;
+        // 핸들 보관 — 보스 사망/teardown 시 명시 회수(유령 콜백 방어선 명확화).
+        boss._enrageTimer = this.time.delayedCall(300, () => { if (!boss.dead) this._enrageBoss(boss); });
+      } else {
+        this._enrageBoss(boss);
+      }
+    }
   }
 
   // 보스 분노 진입(1회) — 이동속도 ×1.9, 공격쿨 ×0.65(getAttackCooldown이 def.attackCooldown 읽음).
   // 진입 연출: white tint 플래시 + 카메라 셰이크(motionOk 게이트) + ENRAGED 토스트.
   _enrageBoss(boss) {
     boss._enraged = true;
-    boss.speed *= 1.9;
+    // baseSpeed 기준 ×1.9 — guardUp(×1.25)과 중복곱(×2.375) 방지. 큰 쪽 적용.
+    boss.speed = Math.max(boss.speed, (boss._baseSpeed ?? boss.speed) * 1.9);
     // def는 spawnBoss에서 만든 per-boss 복사본({...stats.def,damage})이라 직접 변형해도 원본 BOSS_TYPES 불변.
     boss.def.attackCooldown = Math.max(200, Math.round(boss.def.attackCooldown * 0.65));
     this.showToast('ENRAGED', null, true);
@@ -1750,8 +1739,9 @@ export default class CombatScene extends Phaser.Scene {
         boss.def.behavior = { type: 'guard', reduce: 0.65 };
         boss.behavior = ENEMY_BEHAVIORS.guard;
         boss.guarding = true;
-        boss.speed *= 1.25;
-        boss.restoreTint(); // guard 강철빛 tint 노출
+        // speed는 baseSpeed 기준으로(분노 ×1.9와 중복곱 방지). 큰 쪽 적용.
+        boss.speed = Math.max(boss.speed, (boss._baseSpeed ?? boss.speed) * 1.25);
+        // restoreTint는 110ms delayedCall에서만 — 여기서 즉시 호출하면 흰 플래시가 guard tint로 덮여 안 보임(BUG-01).
         this.showToast('방어 태세', null, true);
         SFX.play('boss_intro');
         break;
@@ -1766,10 +1756,11 @@ export default class CombatScene extends Phaser.Scene {
     }
   }
 
-  // 헤럴드 페이즈 소환 — sludge_zombie 2체를 150~200ms 스태거로. 동시 다중 spawn 금지·alive≤5 캡.
+  // 헤럴드 페이즈 소환 — flanker_zombie + grabber 1체를 170ms 스태거로. 동시 다중 spawn 금지·alive≤5 캡.
   // delayedCall은 scene 타이머(per-enemy 아님)라 perf 안전. teardown/보스사망 가드로 유령 소환 차단.
   _bossSummonAdds(boss) {
-    const adds = ['sludge_zombie', 'sludge_zombie'];
+    // 위협 강화 — 빠른 측면포위(flanker) + 속박형(grabber) 혼합. alive≤5 캡은 아래 가드가 유지.
+    const adds = ['flanker_zombie', 'grabber'];
     adds.forEach((key, i) => {
       this.time.delayedCall(i * 170, () => {
         if (!this._bossActive || !this.director || boss.dead) return;
@@ -1965,7 +1956,12 @@ export default class CombatScene extends Phaser.Scene {
   // 공격/사망 중엔 모션을 가로채지 않고 tint만(공격 스윙·사망 포즈 보호).
   flashPlayer() {
     this.character.setTint(0xff5050);
-    this.time.delayedCall(120, () => { if (this.character?.active) this.character.clearTint(); });
+    // 연속 피격 시 직전 clearTint 예약이 새 tint를 조기 소거하지 않게 — 이전 타이머 취소 후 재등록.
+    this._flashTintTimer?.remove();
+    this._flashTintTimer = this.time.delayedCall(120, () => {
+      this._flashTintTimer = null;
+      if (this.character?.active) this.character.clearTint();
+    });
     if (!this.motionOk || this._attacking || this._playerDead) return;
     const key = this._animKey(this.characterStage, 'hit');
     if (this.anims.exists(key)) this.character.play(key); // onComplete → walk 복귀
@@ -1976,11 +1972,16 @@ export default class CombatScene extends Phaser.Scene {
   _startPlayerDeathAnim() {
     this._playerDead = true;
     this.idleBobTween?.pause();
+    // 피격 tint 복원 예약 취소 + 즉시 tint 정리 — 사망 포즈에 붉은 피격 tint가 남지 않게.
+    this._flashTintTimer?.remove();
+    this._flashTintTimer = null;
+    this.character?.clearTint();
     if (this._attacking) this._forceAttackRecover();
     const atlasKey = ANIM_MANIFEST[this.characterStage]?.key;
     if (!this.motionOk) {
+      // reduced-motion — death 애니 생략하되 walk(idleFrame) 대신 death_2(쓰러진 포즈)로 고정.
       if (atlasKey && this.textures.exists(atlasKey)) {
-        this.character.setTexture(atlasKey, CHARACTER_ANIM.idleFrame);
+        this.character.setTexture(atlasKey, 'death_2');
       }
       return;
     }
@@ -2004,7 +2005,7 @@ export default class CombatScene extends Phaser.Scene {
     const py = this.groundY - this.charDisplayH * 0.5; // 몸 중앙 높이(바닥 직선 회피)
     const gx = grabberX != null ? grabberX : this.playerX + 70;
     const x0 = this.playerX, x2 = gx;
-    const sag = 9; // 중앙 처짐(px) — 팽팽한 직선이 아니라 끌려가는 느낌
+    const sag = Math.max(4, (x2 - x0) * 0.12); // 중앙 처짐(px) — 거리 비례(가까우면 덜, 멀면 더 늘어짐)
     const cx = (x0 + x2) / 2, cy = py + sag; // 베지어 제어점(아래로)
     const g = this.add.graphics().setDepth(this.parallax.topDepth + 2);
     const N = 9;
@@ -2018,6 +2019,7 @@ export default class CombatScene extends Phaser.Scene {
       g.fillStyle(0xc060ff, isAnchor ? 1 : (i % 2 ? 0.9 : 0.55));
       g.fillCircle(x, y, isAnchor ? 3.5 : 2);
     }
+    g.setAlpha(1); // 펄스 tween 전 기준 alpha 명시(이전 잔여 alpha 상속 방지)
     this._bindTether = g;
     if (this.motionOk) {
       this._bindTetherTween = this.tweens.add({
@@ -2044,6 +2046,7 @@ export default class CombatScene extends Phaser.Scene {
       .setStrokeStyle(1.5, COMBAT_COLORS.hazard, 0.7)
       .setDepth(this.parallax.topDepth + 4)
       .setBlendMode(Phaser.BlendModes.ADD);
+    this._trackPoisonFx(glob); // 런 종료 등 비행 중 teardown이 끼어도 회수(잔상 방지)
     // 포물선 — x는 선형 보간, y는 위로 솟았다 떨어지는 아치(onUpdate에서 sin).
     const dur = 420;
     const arc = { t: 0 };
@@ -2058,19 +2061,34 @@ export default class CombatScene extends Phaser.Scene {
         glob.y = fromY + (ty - fromY) * t - Math.sin(t * Math.PI) * 40; // 40px 아치
       },
       onComplete: () => {
+        this._untrackPoisonFx(glob);
         if (glob.active) glob.destroy();
         // 착탄 스플랫 — 플레이어 발치에 짧은 녹색 퍼프(생성→tween→destroy).
         const splat = this.add
           .ellipse(tx, ty, 18, 10, COMBAT_COLORS.toxicGlow, 0.8)
           .setDepth(this.parallax.topDepth + 4)
           .setBlendMode(Phaser.BlendModes.ADD);
+        this._trackPoisonFx(splat);
         this.tweens.add({
           targets: splat, scaleX: 2, scaleY: 2, alpha: 0, duration: 240, ease: 'Quad.out',
-          onComplete: () => { if (splat.active) splat.destroy(); }
+          onComplete: () => { this._untrackPoisonFx(splat); if (splat.active) splat.destroy(); }
         });
         apply();
       }
     });
+  }
+
+  // 독 투척 연출 오브젝트 추적 — 비행/스플랫 중 teardown이 끼어도 잔상 없이 회수.
+  _trackPoisonFx(o) { (this._poisonFx ||= []).push(o); }
+  _untrackPoisonFx(o) {
+    const a = this._poisonFx;
+    if (a) { const i = a.indexOf(o); if (i >= 0) a.splice(i, 1); }
+  }
+  _clearPoisonFx() {
+    if (this._poisonFx) {
+      for (const o of this._poisonFx) { if (o?.active) { this.tweens.killTweensOf(o); o.destroy(); } }
+      this._poisonFx.length = 0;
+    }
   }
 
   // 플레이어 독 DoT — 단일 슬롯, ticks회 틱 후 종료. per-enemy식 타이머 없이 update 루프가 now 비교로 구동.

@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import Enemy from './Enemy.js';
 import { LOGICAL } from '../constants/layout.js';
-import { PLAYER, SPAWN, SPAWN_WEIGHTS, ENEMY_TYPES, ELITE, waveParams } from '../constants/combat.js';
+import { PLAYER, SPAWN, SPAWN_WEIGHTS, SPAWN_MIN_WAVE, ENEMY_TYPES, ELITE, waveParams } from '../constants/combat.js';
 
 // 전투 운영자 — 자동 진행 사이드스크롤 전투의 두뇌.
 //   · 웨이브 스폰(우측 밖 → 좌측 접근)
@@ -107,9 +107,15 @@ export default class CombatDirector {
   }
 
   spawn() {
-    const typeKey = this.pickSpawnType();
+    const w = this.getWaveIndex();
+    let typeKey = this.pickSpawnType();
+    // 타입 minWave 게이트 — 초반 메카닉 과부하 방지. 미달이면 기본 압박형(sludge/flanker)으로 대체.
+    const minW = SPAWN_MIN_WAVE[typeKey];
+    if (minW != null && w < minW) {
+      typeKey = Math.random() < 0.5 ? 'sludge_zombie' : 'flanker_zombie';
+    }
     // 엘리트 승격 — minWave 이상에서 낮은 확률. native behavior는 유지하고 HP/스케일/tint만 강화.
-    const elite = this.getWaveIndex() >= ELITE.minWave && Math.random() < ELITE.chance;
+    const elite = w >= ELITE.minWave && Math.random() < ELITE.chance;
     const enemy = new Enemy(this.scene, {
       typeKey,
       elite,

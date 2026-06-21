@@ -106,15 +106,15 @@ export default class SettingsScene extends Phaser.Scene {
     this.label(inner, 20, 126, 'BGM 볼륨', C.gray, '13px');
     mw.bgmBar = this.add.graphics();
     inner.add(mw.bgmBar);
-    mw.bgmMinus = this.makeButton(35, 150, 32, 28, () => this.stepVolume('bgm', -1), inner);
-    mw.bgmPlus = this.makeButton(265, 150, 32, 28, () => this.stepVolume('bgm', +1), inner);
+    mw.bgmMinus = this.makeButton(35, 150, 32, 30, () => this.stepVolume('bgm', -1), inner);
+    mw.bgmPlus = this.makeButton(265, 150, 32, 30, () => this.stepVolume('bgm', +1), inner);
 
     // SFX 볼륨
     this.label(inner, 20, 192, 'SFX 볼륨', C.gray, '13px');
     mw.sfxBar = this.add.graphics();
     inner.add(mw.sfxBar);
-    mw.sfxMinus = this.makeButton(35, 216, 32, 28, () => this.stepVolume('sfx', -1), inner);
-    mw.sfxPlus = this.makeButton(265, 216, 32, 28, () => this.stepVolume('sfx', +1), inner);
+    mw.sfxMinus = this.makeButton(35, 216, 32, 30, () => this.stepVolume('sfx', -1), inner);
+    mw.sfxPlus = this.makeButton(265, 216, 32, 30, () => this.stepVolume('sfx', +1), inner);
 
     // 모션 줄이기 토글
     this.label(inner, 20, 258, '모션 줄이기', C.body);
