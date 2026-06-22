@@ -15,7 +15,9 @@ const BGMVOL_KEY = 'ls_bgmvol'; // BGM 버스 볼륨(0~1)
 
 const MASTER_VOLUME = 0.5; // 마스터 상한(개별 레시피 vol은 이 아래로 합성)
 const MAX_VOICES = 8; // 동시 재생 보이스 상한(SFX만 계수, BGM 제외)
-const BGM_VOLUME = 0.11; // 앰비언트 BGM — 낮게(전투 SFX를 덮지 않되 분위기는 들리게)
+const BGM_VOLUME = 0.95;   // BGM out 게인 — 아주 크게(요청). 컴프레서+메이크업으로 클리핑 없이 라우드.
+const BGM_MAKEUP = 1.7;    // 컴프레서 뒤 메이크업 게인 — 압축으로 낮아진 평균을 끌어올려 체감 음량↑.
+const BGM_TEMPO = 96;      // BPM — 스산하면서도 추진력 있는 드라이브.
 
 let ctx = null; // AudioContext (첫 제스처에서 lazy 생성)
 let master = null; // 마스터 gain 노드(음소거 토글이 묶이는 한 겹)
@@ -204,13 +206,25 @@ const RECIPES = {
 function startBgm() {
   if (bgm || !ctx || muted) return;
   try {
+    // 컴프레서 — 여러 레이어 합이 라우드해도 피크를 눌러 클리핑/하시함을 막는다(크게+깔끔).
+    // 뒤에 메이크업 게인을 둬 압축으로 낮아진 평균을 다시 끌어올린다(라우드니스 극대화).
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -22;
+    comp.knee.value = 24;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.003;
+    comp.release.value = 0.16;
+    const makeup = ctx.createGain();
+    makeup.gain.value = BGM_MAKEUP;
+    comp.connect(makeup).connect(bgmBus);
+
     const out = ctx.createGain();
     out.gain.value = BGM_VOLUME;
-    out.connect(bgmBus);
+    out.connect(comp);
 
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 600;
+    lp.frequency.value = 620;
     lp.connect(out);
 
     const droneNodes = [];
@@ -226,16 +240,31 @@ function startBgm() {
       return osc;
     };
 
-    // ① 서브 베이스 — 깊은 41Hz(A0) sine. lp 우회해 out 직결(저역 손실 방지).
-    startOsc(41.2, 'sine', 0.45, out);
+    // 짧은 음 1발을 절대시각 t에 예약하는 헬퍼(아르페지오/베이스/타악 공용). onended 정리(누수 0).
+    const note = ({ type = 'square', freq, freqEnd = null, t, dur, vol, dest = out, attack = 0.004 }) => {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t);
+      if (freqEnd != null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t + dur);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g).connect(dest);
+      osc.start(t);
+      osc.stop(t + dur + 0.02);
+      osc.onended = () => { try { osc.disconnect(); g.disconnect(); } catch { /* 무시 */ } };
+    };
 
-    // ② 디튠 드론 패드 — 살짝 디튠해 두께를 준다.
-    startOsc(55, 'sawtooth', 0.5, lp);
-    startOsc(55.5, 'sawtooth', 0.5, lp);
-    startOsc(82.41, 'triangle', 0.28, lp);
+    // ── 스산한 베드(드론) ──────────────────────────────────────────────
+    // ① 서브 베이스 — 깊은 41Hz(A0). lp 우회 out 직결.
+    startOsc(41.2, 'sine', 0.34, out);
+    // ② 디튠 드론 패드 — 두께(리듬 자리 확보 위해 기존보다 약간 낮춤).
+    startOsc(55, 'sawtooth', 0.32, lp);
+    startOsc(55.5, 'sawtooth', 0.32, lp);
+    startOsc(82.41, 'triangle', 0.20, lp);
 
-    // ③ 황량한 바람 — 화이트노이즈를 좁은 밴드패스로 통과시켜 "휘잉" 도는 바람 베드.
-    //    느린 LFO로 밴드 중심을 흔들어 정적이지 않게.
+    // ③ 황량한 바람 — 좁은 밴드패스 노이즈 + 느린 LFO.
     const wind = ctx.createBufferSource();
     wind.buffer = getNoiseBuffer();
     wind.loop = true;
@@ -244,7 +273,7 @@ function startBgm() {
     windBp.frequency.value = 480;
     windBp.Q.value = 0.8;
     const windGain = ctx.createGain();
-    windGain.gain.value = 0.09;
+    windGain.gain.value = 0.08;
     wind.connect(windBp).connect(windGain).connect(out);
     wind.start();
     const windLfo = ctx.createOscillator();
@@ -255,7 +284,7 @@ function startBgm() {
     windLfo.connect(windLfoGain).connect(windBp.frequency);
     windLfo.start();
 
-    // ④ 느린 LFO — 드론 필터 컷오프를 ±220Hz로 흔들어 "숨 쉬는" 불안한 질감.
+    // ④ 느린 LFO — 드론 컷오프를 흔들어 "숨 쉬는" 질감.
     const lfo = ctx.createOscillator();
     lfo.type = 'sine';
     lfo.frequency.value = 0.07;
@@ -264,60 +293,99 @@ function startBgm() {
     lfo.connect(lfoGain).connect(lp.frequency);
     lfo.start();
 
-    // ⑤ 희소 단조 모티프 — 2.8초마다 A단조 음 하나. 8스텝마다 멀리 우는 종(낮은 옥타브).
-    //    음소거/비실행 중엔 스킵(CPU 절약).
-    const scale = [220, 261.63, 293.66, 329.63, 392, 349.23, 293.66, 261.63]; // A C D E G F D C (A단조)
-    let step = 0;
-    const interval = setInterval(() => {
-      if (!ctx || muted || ctx.state !== 'running') return;
-      const t = ctx.currentTime;
+    // ── 역동적 리듬 엔진 (룩어헤드 스케줄러) ───────────────────────────
+    // A단조 4마디 루프(Am–F–G–Am). 16분음 격자로 베이스 펄스 + 긴장 아르페지오 + 킥/햇.
+    // 마디마다 코드: bass(저역 루트), tones(아르페지오 4음).
+    const CHORDS = [
+      { bass: 55.00, tones: [220.00, 261.63, 329.63, 440.00] }, // Am (A1 / A3 C4 E4 A4)
+      { bass: 43.65, tones: [174.61, 220.00, 261.63, 349.23] }, // F  (F1 / F3 A3 C4 F4)
+      { bass: 49.00, tones: [196.00, 246.94, 293.66, 392.00] }, // G  (G1 / G3 B3 D4 G4)
+      { bass: 55.00, tones: [220.00, 246.94, 329.63, 415.30] }  // Am→리딩톤(G#4) 긴장
+    ];
+    // 마디 내 8개 8분음 자리의 아르페지오 인덱스(오르내림으로 추진력 + 불안).
+    const ARP = [0, 2, 3, 2, 1, 2, 3, 1];
 
-      // 단조 모티프 — 부드러운 triangle, 길게 페이드.
-      const f = scale[step % scale.length];
-      const osc = ctx.createOscillator();
-      osc.type = 'triangle';
-      osc.frequency.value = f;
+    // 킥 — sine 피치드롭 + 짧은 클릭. 추진력의 중심.
+    const kick = (t, strong) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(150, t);
+      o.frequency.exponentialRampToValueAtTime(46, t + 0.12);
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.05, t + 0.6);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 2.5);
-      osc.connect(g).connect(out);
-      osc.start(t);
-      osc.stop(t + 2.7);
-      osc.onended = () => {
-        try {
-          osc.disconnect();
-          g.disconnect();
-        } catch {
-          /* 무시 */
-        }
-      };
+      g.gain.setValueAtTime(strong ? 0.85 : 0.5, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(g).connect(out);
+      o.start(t); o.stop(t + 0.18);
+      o.onended = () => { try { o.disconnect(); g.disconnect(); } catch { /* 무시 */ } };
+    };
+    // 햇 — 하이패스 노이즈 짧게.
+    const hat = (t, vol) => {
+      const s = ctx.createBufferSource();
+      s.buffer = getNoiseBuffer();
+      const f = ctx.createBiquadFilter();
+      f.type = 'highpass';
+      f.frequency.value = 6800;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+      s.connect(f).connect(g).connect(out);
+      s.start(t); s.stop(t + 0.06);
+      s.onended = () => { try { s.disconnect(); g.disconnect(); f.disconnect(); } catch { /* 무시 */ } };
+    };
 
-      // 멀리 우는 종 — 8스텝(약 22초)마다 낮은 옥타브 음을 길게(공허한 종말 신호).
-      if (step % 8 === 0) {
+    const SIXTEENTH = (60 / BGM_TEMPO) / 4; // 16분음 길이(초)
+    let s16 = 0;                            // 0..63 (4마디 × 16스텝)
+    let nextNoteTime = ctx.currentTime + 0.12;
+
+    const scheduleStep = (s, t) => {
+      const bar = Math.floor(s / 16) % 4;
+      const inBar = s % 16;
+      const chord = CHORDS[bar];
+
+      // 킥 — 강(0,8) / 중(4,12).
+      if (inBar % 8 === 0) kick(t, true);
+      else if (inBar % 4 === 0) kick(t, false);
+      // 햇 — 8분 뒷박(2,6,10,14) 또렷, 그 외 홀수 16분에 고스트(아주 작게).
+      if (inBar % 4 === 2) hat(t, 0.13);
+      else if (inBar % 2 === 1) hat(t, 0.04);
+
+      // 8분음 자리(짝수 16분)에 베이스 펄스 + 아르페지오.
+      if (inBar % 2 === 0) {
+        const eighth = inBar / 2; // 0..7
+        // 베이스 — 거친 saw 펄스(추진). 마지막 마디 끝박은 옥타브 점프로 긴장.
+        const bf = chord.bass * (bar === 3 && eighth >= 6 ? 2 : 1);
+        note({ type: 'sawtooth', freq: bf, t, dur: 0.16, vol: 0.22, attack: 0.002, dest: out });
+        // 아르페지오 — 긴장된 triangle(스산), 짧고 또렷. 4마디째는 한 옥타브 올려 고조.
+        const af = chord.tones[ARP[eighth]] * (bar === 3 ? 2 : 1);
+        note({ type: 'triangle', freq: af, t, dur: 0.19, vol: 0.085, attack: 0.003, dest: out });
+      }
+
+      // 멀리 우는 종 — 각 마디 첫 박(공허/종말 잔향). lp 베드 위로 길게.
+      if (inBar === 0) {
         const bell = ctx.createOscillator();
         bell.type = 'sine';
-        bell.frequency.value = f / 2;
+        bell.frequency.value = chord.tones[0] / 2;
         const bg = ctx.createGain();
         bg.gain.setValueAtTime(0.0001, t);
-        bg.gain.exponentialRampToValueAtTime(0.07, t + 0.05);
-        bg.gain.exponentialRampToValueAtTime(0.0001, t + 4.0);
+        bg.gain.exponentialRampToValueAtTime(0.06, t + 0.04);
+        bg.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
         bell.connect(bg).connect(out);
-        bell.start(t);
-        bell.stop(t + 4.2);
-        bell.onended = () => {
-          try {
-            bell.disconnect();
-            bg.disconnect();
-          } catch {
-            /* 무시 */
-          }
-        };
+        bell.start(t); bell.stop(t + 2.6);
+        bell.onended = () => { try { bell.disconnect(); bg.disconnect(); } catch { /* 무시 */ } };
       }
-      step++;
-    }, 2800);
+    };
 
-    bgm = { out, lp, lfo, lfoGain, wind, windBp, windGain, windLfo, windLfoGain, droneNodes, interval };
+    // 룩어헤드 — 25ms마다 0.12s 앞까지 미리 예약해 setInterval 지터에도 박자가 안 흔들린다.
+    const interval = setInterval(() => {
+      if (!ctx || muted || ctx.state !== 'running') return;
+      while (nextNoteTime < ctx.currentTime + 0.12) {
+        scheduleStep(s16, nextNoteTime);
+        nextNoteTime += SIXTEENTH;
+        s16 = (s16 + 1) % 64;
+      }
+    }, 25);
+
+    bgm = { comp, makeup, out, lp, lfo, lfoGain, wind, windBp, windGain, windLfo, windLfoGain, droneNodes, interval };
   } catch {
     bgm = null; // BGM 실패해도 SFX/게임 진행 무중단
   }

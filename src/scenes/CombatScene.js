@@ -1014,7 +1014,11 @@ export default class CombatScene extends Phaser.Scene {
       // 히트스톱 + 카메라 셰이크 + 임팩트 VFX — 프레임 임팩트(attack_2)와 동기. reduced-motion 시 전체 생략.
       if (this.motionOk) {
         this.hitStopUntil = this.time.now + MOTION.hitStopMs;
-        if (this.cameras?.main) this.cameras.main.shake(MOTION.chopShakeMs, MOTION.chopShakeIntensity);
+        // 역동감 — 연속 처치(콤보)가 쌓일수록 타격 셰이크를 살짝 강화(최대 ×1.4).
+        if (this.cameras?.main) {
+          const comboKick = 1 + Math.min(this.comboCount || 0, 8) * 0.05;
+          this.cameras.main.shake(MOTION.chopShakeMs, MOTION.chopShakeIntensity * comboKick);
+        }
         const slashColor = this._slashColorForWeapon();
         this._spawnPunchImpact(enemy, slashColor); // 맨손 펀치(슬래시 아크 대체)
         this._spawnImpactSparks(enemy, slashColor);
@@ -1249,6 +1253,64 @@ export default class CombatScene extends Phaser.Scene {
     });
   }
 
+  // ── 처치 버스트 (역동감) ───────────────────────────────────────────────
+  // 적이 죽는 순간 골드 링 확산 + 360° 파편으로 "처치 임팩트"를 준다(히트 VFX는 흰/속성색,
+  // 처치는 골드로 구분). 콤보가 높을수록 더 크게 터져 연속 처치의 고조감을 살린다.
+  // reduced-motion 게이트는 호출부(onEnemyKilled). 전부 tween→onComplete destroy(누수 0).
+  _spawnKillBurst(enemy) {
+    if (!enemy?.container?.active) return;
+    const depth = this.parallax.topDepth + 4;
+    const h = enemy.displayHeight ?? 28;
+    const cx = enemy.container.x;
+    const cy = enemy.container.y - h * 0.5;
+    const power = 1 + (Math.min(this.comboCount || 0, 12) / 12) * 0.8; // 1.0~1.8 (콤보 비례)
+
+    // 1) 확산 링 — 처치 표식(골드).
+    const ring = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+    ring.lineStyle(3, COMBAT_COLORS.gold, 0.9);
+    ring.strokeCircle(0, 0, 6);
+    this.tweens.add({
+      targets: ring, scaleX: 3.4 * power, scaleY: 3.4 * power, alpha: 0,
+      duration: 300, ease: 'Quad.out',
+      onComplete: () => { if (ring.active) ring.destroy(); }
+    });
+
+    // 2) 360° 파편 — 사방으로 튀는 조각 + 중심 핵.
+    const g = this.add.graphics().setDepth(depth).setPosition(cx, cy);
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 / n) * i + i * 0.7;
+      const outR = (10 + (i % 3) * 4) * power;
+      g.lineStyle(2, i % 2 ? 0xffffff : COMBAT_COLORS.gold, 0.95);
+      g.beginPath();
+      g.moveTo(Math.cos(a) * 3, Math.sin(a) * 3);
+      g.lineTo(Math.cos(a) * outR, Math.sin(a) * outR);
+      g.strokePath();
+    }
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(0, 0, 3.5 * power);
+    this.tweens.add({
+      targets: g, alpha: 0, scaleX: 1.5, scaleY: 1.5,
+      duration: 230, ease: 'Quad.out',
+      onComplete: () => { if (g.active) g.destroy(); }
+    });
+  }
+
+  // ── 콤보 서지 (역동감) ─────────────────────────────────────────────────
+  // 마일스톤(×COMBO_GRADE_STEP 배수) 돌파 순간 골드 화면 플래시 + 미세 셰이크로 고조감을 준다.
+  _comboSurge() {
+    if (!this.motionOk) return;
+    const flash = this.add
+      .rectangle(0, 0, LOGICAL.width, COMBAT_H, COMBAT_COLORS.gold, 0)
+      .setOrigin(0, 0)
+      .setDepth(70); // HUD(61) 위, 오버레이(88+) 아래
+    this.tweens.add({
+      targets: flash, alpha: 0.16, duration: 70, ease: 'Quad.out', yoyo: true,
+      onComplete: () => flash.destroy()
+    });
+    if (this.cameras?.main) this.cameras.main.shake(120, 0.004);
+  }
+
   // 스윙 강제 복구 — 복귀 트윈/onComplete가 어떤 이유로든 누락돼 _attacking이 stuck됐을 때
   // (워치독·teardown 등) 진행 중 트윈을 정리하고 캐릭터/무기를 평상값으로 스냅한다.
   _forceAttackRecover() {
@@ -1283,6 +1345,7 @@ export default class CombatScene extends Phaser.Scene {
   onEnemyKilled(enemy) {
     SFX.play('enemy_kill'); // 처치음(픽셀 크런치) — throttle로 폭주 처치 시 스팸 억제
     this._registerCombo(); // 킬 콤보 카운터 갱신(창 내 연속 처치 → +1, 임계 돌파 시 등급 상승 예약)
+    if (this.motionOk) this._spawnKillBurst(enemy); // 역동감 — 처치 버스트(콤보 비례, _registerCombo 뒤라 콤보 반영)
 
     // [seam D] 행동 패턴 onDeath — explode(사망폭발) 등. scene 부작용은 ctx 콜백으로만 주입(Enemy 비참조).
     // VFX는 ctx 안에서 motionOk 게이트(behaviors는 모션 분기 모름), 데미지는 reduced-motion에도 적용.
@@ -1430,6 +1493,7 @@ export default class CombatScene extends Phaser.Scene {
     // 10·20… 돌파 → 다음 드롭 1개 grade +1 예약(이미 예약돼 있으면 유지).
     if (this.comboCount >= COMBO_GRADE_STEP && this.comboCount % COMBO_GRADE_STEP === 0) {
       this._comboGradeBumpPending = true;
+      this._comboSurge(); // 역동감 — 마일스톤 화면 서지
     }
     this._updateComboHud();
   }
