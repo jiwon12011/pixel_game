@@ -253,6 +253,22 @@ const GameState = {
     this.saveMeta();
   },
 
+  // 첫 실행 인트로(세계관→튜토리얼)를 닫으면 1회 호출 — 영속(다신 안 뜸). 멱등.
+  markIntroSeen() {
+    if (this.meta.introSeen) return;
+    this.meta.introSeen = true;
+    this.saveMeta();
+  },
+
+  // ── 엔딩(최종 보스 처치) ──────────────────────────────────────────────
+  // 게이트키퍼 처치 시 1회 호출 — 클리어 기록 + New Game+ 레벨 +1(다음 런부터 난이도↑). 영속.
+  recordClear() {
+    this.meta.cleared = true;
+    this.meta.clearCount = (this.meta.clearCount || 0) + 1;
+    this.meta.ngPlus = (this.meta.ngPlus || 0) + 1;
+    this.saveMeta();
+  },
+
   // ── 도감 (meta) ──────────────────────────────────────────────────────
   recordCodex(weaponId) {
     const list = this.meta.codex.discoveredRecipes;
@@ -539,6 +555,10 @@ const GameState = {
       const m = freshMeta();
       m.runCount = d.runCount ?? m.runCount;
       m.onboarded = d.onboarded ?? false; // 온보딩 완료 플래그(구 세이브엔 없으면 false — 첫 탭 힌트 노출)
+      m.introSeen = d.introSeen ?? false; // 인트로 노출 완료(구 세이브엔 없으면 false — 첫 실행 인트로 노출)
+      m.cleared = d.cleared ?? false;     // 엔딩 도달 여부(구 세이브엔 없으면 false)
+      m.clearCount = d.clearCount ?? 0;   // 누적 클리어 횟수
+      m.ngPlus = d.ngPlus ?? 0;           // New Game+ 레벨
       m.salvagePoints = d.salvagePoints ?? 0; // R8 — 영구 화폐(구 세이브엔 없으면 0)
       m.pendingSp = d.pendingSp ?? 0;         // 대기 SP(구 세이브엔 없으면 0 — 폴백)
       m.runClosed = d.runClosed ?? false;     // 닫힌 런 플래그(구 세이브엔 없으면 false — 폴백)

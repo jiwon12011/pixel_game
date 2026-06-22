@@ -15,6 +15,13 @@ export const META_DEFAULTS = {
   // 첫 플레이 온보딩 완료 플래그 — 자동공격이라 "탭=공격 가속"이 전달 안 됨.
   // false면 첫 전투에서 탭 힌트 노출, 첫 탭 성공 시 true로 영속(다신 안 뜸).
   onboarded: false,
+  // 첫 실행 인트로(세계관 스토리 → 튜토리얼) 노출 완료 플래그. false면 첫 전투 진입 시
+  // 1회 전체화면 인트로를 띄우고, 닫으면 true로 영속(다신 안 뜸).
+  introSeen: false,
+  // ── 엔딩 / New Game+ ──
+  cleared: false,   // 최종 보스(게이트키퍼)를 한 번이라도 처치해 탈출 엔딩을 봤는가
+  clearCount: 0,    // 누적 클리어(탈출) 횟수
+  ngPlus: 0,        // New Game+ 레벨 — 클리어할 때마다 +1, 적/보스 체력·드롭 배율 가산(ngPlusMult)
   // R8 — 잔해 포인트(SP): 런 종료마다 적립되는 영구 화폐. 강화 보드(영구 업글)에서 소비.
   salvagePoints: 0,
   // 사망 시 적립 대기 중인 SP — 런 커밋(startNewRun) 시점에 salvagePoints로 1회 확정.

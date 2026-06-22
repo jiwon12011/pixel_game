@@ -26,6 +26,9 @@ export default class CombatDirector {
   constructor(scene, cfg) {
     this.scene = scene;
     this.spawnList = cfg.spawnList;
+    // 동적 스폰 풀 공급원 — 지역마다 다른 적 구성을 위해 매 스폰 시 현재 풀을 읽는다.
+    // 없으면 고정 spawnList 폴백(구 동작 호환).
+    this.getSpawnList = cfg.getSpawnList || (() => this.spawnList || []);
     this.groundY = cfg.groundY;
     this.depth = cfg.depth;
     this.motionOk = cfg.motionOk;
@@ -95,7 +98,8 @@ export default class CombatDirector {
 
   // 가중 스폰 선택 — SPAWN_WEIGHTS 비율로 뽑아 tank를 희소화. 가중치 없는 타입은 1.
   pickSpawnType() {
-    const list = this.spawnList;
+    const list = this.getSpawnList();
+    if (!list || !list.length) return null;
     let total = 0;
     for (const k of list) total += SPAWN_WEIGHTS[k] ?? 1;
     let r = Math.random() * total;
@@ -109,6 +113,7 @@ export default class CombatDirector {
   spawn() {
     const w = this.getWaveIndex();
     let typeKey = this.pickSpawnType();
+    if (!typeKey) return; // 활성 풀이 비었으면(이론상 없음) 스폰 스킵 — 빈 Enemy 생성 방지
     // 타입 minWave 게이트 — 초반 메카닉 과부하 방지. 미달이면 기본 압박형(sludge/flanker)으로 대체.
     const minW = SPAWN_MIN_WAVE[typeKey];
     if (minW != null && w < minW) {

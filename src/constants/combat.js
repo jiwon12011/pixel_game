@@ -11,7 +11,11 @@ export const SPAWN_WEIGHTS = {
   flanker_zombie: 3,
   putrifier: 2,
   grabber: 2,
-  tank_mutant: 1
+  tank_mutant: 1,
+  // 지역 전용 적 — 드론/폐수는 보통, 폐갑주는 단단해 희소화.
+  drone_zombie: 2,
+  sewer_raider: 2,
+  armored_zombie: 1
 };
 
 // 타입별 최소 등장 웨이브 — 이 웨이브 미만이면 spawn에서 기본 압박형(sludge/flanker)으로 대체.
@@ -118,8 +122,60 @@ export const ENEMY_TYPES = {
     displayHeight: 128,
     contactRange: 78,
     behavior: { type: 'poisonThrow', dmg: 6, ticks: 2 }
+  },
+  // ── 지역 전용 적 3종(기존 행동 타입 재사용, 외형/스탯/지역으로 차별화) ──
+  // 폐갑주 좀비 — 폐철판을 두른 중장갑. 정면 경감이 탱크보다 강함(0.45). 느리고 매우 단단.
+  armored_zombie: {
+    maxHP: 160,
+    speed: 22,
+    damage: 13,
+    attackCooldown: 1300,
+    displayHeight: 138,
+    contactRange: 82,
+    behavior: { type: 'guard', reduce: 0.45 }
+  },
+  // 드론 좀비 — 가볍고 빠른 공중 교란체. 체력 낮아 우선 제거 대상. 측면 대시로 파고든다.
+  drone_zombie: {
+    maxHP: 46,
+    speed: 62,
+    damage: 7,
+    attackCooldown: 820,
+    displayHeight: 112,
+    contactRange: 64,
+    behavior: { type: 'flank', dashRange: 160, dashMult: 2.4 }
+  },
+  // 폐수 레이더 — 하수도/늪의 매복형. 근접 시 속박(grab)으로 발을 묶는다. 중간 체력·기동.
+  sewer_raider: {
+    maxHP: 100,
+    speed: 36,
+    damage: 12,
+    attackCooldown: 1050,
+    displayHeight: 126,
+    contactRange: 78,
+    behavior: { type: 'grab', bindMs: 600 }
   }
 };
+
+// ── 지역별 스폰 풀 (region id → 적 키 배열) ─────────────────────────────────
+// 지역마다 등장 적 구성을 다르게 한다. 텍스처는 지역 진입 시 CombatScene이 지연 로드 후
+// _activeSpawnList를 이 풀로 교체한다(미로드 타입 스폰 방지). regions.js의 id와 1:1.
+export const REGION_SPAWN_POOLS = {
+  downtown: ['sludge_zombie', 'flanker_zombie', 'grabber'],
+  highway: ['flanker_zombie', 'sludge_zombie', 'tank_mutant'],
+  factory: ['drone_zombie', 'sludge_zombie', 'tank_mutant'],
+  sewer: ['putrifier', 'sewer_raider', 'sludge_zombie'],
+  bunker: ['armored_zombie', 'grabber', 'flanker_zombie'],
+  hospital: ['putrifier', 'drone_zombie', 'sludge_zombie'],
+  powerplant: ['drone_zombie', 'tank_mutant', 'armored_zombie'],
+  swamp: ['putrifier', 'sewer_raider', 'tank_mutant'],
+  landfill: ['tank_mutant', 'armored_zombie', 'sludge_zombie'],
+  checkpoint: ['armored_zombie', 'drone_zombie', 'sewer_raider', 'flanker_zombie']
+};
+
+// region id → 스폰 풀. 미정의 지역은 기본(SLICE_SPAWN_LIST) 폴백.
+export function regionSpawnPool(regionId) {
+  return REGION_SPAWN_POOLS[regionId] || SLICE_SPAWN_LIST;
+}
 
 // 스폰 운영 — interval/maxAlive는 이제 웨이브(waveParams)가 결정한다.
 // 여기 남은 값은 웨이브와 무관한 스폰장 규칙 + waveIndex 0 기본 폴백.
@@ -148,13 +204,15 @@ export const DROP = {
 // waveIndex(w) → 그 웨이브의 스폰/체력/보상 파라미터.
 // 공식은 ideator 확정값. cap으로 후반 난이도가 발산하지 않게 묶는다.
 export function waveParams(w) {
+  const ng = ngPlusMult(); // New Game+ 가산(1회차엔 1.0)
   return {
     // wave0부터 완만 상승(+6%/wave) + 천장 4.0. 후반 단조(2.5 캡)를 제거해 진행할수록 계속 단단해지게.
-    hpMult: Math.min(4.0, 1.0 + 0.06 * Math.max(0, w)),
+    // NG+엔 천장 위로 ng 배율이 더 곱해져 더 단단해진다(엔드리스 난이도 상승).
+    hpMult: Math.min(4.0, 1.0 + 0.06 * Math.max(0, w)) * ng,
     intervalMin: Math.max(700, 1400 - w * 40),
     intervalMax: Math.max(1100, 2600 - w * 80),
     maxAlive: Math.min(6, 3 + Math.floor(w / 4)),
-    dropMult: Math.min(1.8, 1.0 + w * 0.04)
+    dropMult: Math.min(1.8, 1.0 + w * 0.04) * ng // NG+엔 보상도 함께 상향
   };
 }
 
@@ -200,6 +258,35 @@ export const BOSS_TYPES = {
 export const FIRST_BOSS_WAVE = 7;
 export const BOSS_INTERVAL_WAVES = 7;
 
+// ── 최종 보스 / 엔딩 / New Game+ ────────────────────────────────────────────
+// 마지막 지역(격리 검문소 startWave 45)의 보스 웨이브 49를 "최종 보스"로 본다.
+// 49는 이미 보스 웨이브(7,14,…,49)라 기존 보스 트리거를 그대로 타고, bossStatsForWave가
+// 이 웨이브에서 전용 보스(게이트키퍼)를 반환한다. 처치 시 탈출 엔딩 → New Game+ 해금.
+export const FINAL_BOSS_WAVE = 49;
+export function isFinalBossWave(w) {
+  return w === FINAL_BOSS_WAVE;
+}
+
+// 최종 보스 보상(일반 보스보다 후함).
+export const FINAL_BOSS_REWARD = {
+  coins: 400,
+  materials: { scrap_metal_plate: 4, old_battery_cell: 3, broken_circuit_board: 3, chemical_vial: 2 }
+};
+
+// New Game+ 난이도 — 클리어할 때마다 ngPlus가 1씩 오르고, 적/보스 체력·드롭이 배율로 가산된다.
+// 순환참조(GameState↔combat) 회피를 위해 모듈 변수로 두고, CombatScene이 런 시작 시 주입한다.
+let _ngPlusLevel = 0;
+export function setNgPlusLevel(n) {
+  _ngPlusLevel = Math.max(0, n | 0);
+}
+export function getNgPlusLevel() {
+  return _ngPlusLevel;
+}
+// 레벨당 +18% (NG+1 ×1.18, NG+2 ×1.36 …). 체력/드롭에 곱한다.
+export function ngPlusMult() {
+  return 1 + 0.18 * _ngPlusLevel;
+}
+
 // w가 보스 웨이브인가.
 export function isBossWave(w) {
   return w === FIRST_BOSS_WAVE || (w > FIRST_BOSS_WAVE && (w - FIRST_BOSS_WAVE) % BOSS_INTERVAL_WAVES === 0);
@@ -224,16 +311,37 @@ export function bossKeyForWave(w) {
 // damage는 tier마다 +12%로 완만히(즉사 방지). tier = 보스 회차(첫 보스=0).
 // ※ 첫 보스가 wave 7라 waveParams(7).hpMult가 낮아 자연히 약함(과한 HP벽 방지).
 export function bossStatsForWave(w) {
+  const tier = Math.max(0, bossOccurrenceIndex(w));
+
+  // 최종 보스(게이트키퍼) — 전용 아트가 없어 콜로서스 텍스처를 재사용하되, 더 크고·단단하고·
+  // 이름/배너로 차별화한다. 일반 콜로서스보다 체력 +45%로 "검문소의 문지기"다운 벽.
+  if (isFinalBossWave(w)) {
+    const base = BOSS_TYPES.colossus_boss;
+    const hpMult = (waveParams(w).hpMult + 0.6 * tier) * 1.45; // waveParams.hpMult엔 ng 이미 포함
+    return {
+      key: 'colossus_boss',
+      def: {
+        ...base,
+        name: '게이트키퍼',
+        displayHeight: Math.round(base.displayHeight * 1.15), // 더 거대하게
+        reward: FINAL_BOSS_REWARD // grantBossReward는 stats.def.reward를 읽음
+      },
+      tier,
+      maxHP: Math.round(base.maxHP * hpMult),
+      damage: Math.round(base.damage * (1 + 0.12 * tier) * 1.2 * ngPlusMult()),
+      isFinal: true
+    };
+  }
+
   const key = bossKeyForWave(w);
   const base = BOSS_TYPES[key];
-  const tier = Math.max(0, bossOccurrenceIndex(w));
-  const hpMult = waveParams(w).hpMult + 0.6 * tier;
+  const hpMult = waveParams(w).hpMult + 0.6 * tier; // hpMult엔 ng 포함(체력은 ng 1회만)
   return {
     key,
     def: base,
     tier,
     maxHP: Math.round(base.maxHP * hpMult),
-    damage: Math.round(base.damage * (1 + 0.12 * tier))
+    damage: Math.round(base.damage * (1 + 0.12 * tier) * ngPlusMult()) // 데미지에 ng 1회 적용
   };
 }
 

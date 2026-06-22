@@ -44,6 +44,9 @@ export default class PreloadScene extends Phaser.Scene {
     // Combat을 메인으로 start, Hub를 병렬 launch (전투는 허브 조작 중에도 멈추지 않음 — 기획서)
     this.scene.start('CombatScene');
     this.scene.launch('HubScene');
+
+    // 첫 실행에만 — 세계관→튜토리얼 풀스크린 인트로를 Combat/Hub 위로 띄운다(닫으면 영속).
+    if (!GameState.meta.introSeen) this.scene.launch('IntroScene');
   }
 
   // 현재 장착 무기 텍스처 선행 로드(이미 있거나 매니페스트에 없으면 즉시 통과).

@@ -17,6 +17,7 @@ import { PALETTE } from '../constants/palette.js';
 import {
   PLAYER,
   SLICE_SPAWN_LIST,
+  regionSpawnPool,
   COMBAT_COLORS,
   COMBAT_CSS,
   MOTION,
@@ -27,14 +28,16 @@ import {
   waveParams,
   ENEMY_MEMORY_MAP,
   bossStatsForWave,
-  isBossWave
+  isBossWave,
+  isFinalBossWave,
+  setNgPlusLevel
 } from '../constants/combat.js';
 import { ENEMY_BEHAVIORS } from '../constants/enemyBehaviors.js';
 import { PIXEL_FONT, BODY_FONT, installCrispText } from '../constants/fonts.js';
 import { prefersReducedMotion } from '../utils/motion.js';
 import GameState from '../state/GameState.js';
 import { rollDrop } from '../constants/drops.js';
-import { getRegion, getRegionCombatBonus } from '../constants/regions.js';
+import { getRegion, getRegionCombatBonus, REGION_BY_ID } from '../constants/regions.js';
 import { WEAPON_RECIPES, STAT_UPGRADES, defenseMultiplier } from '../constants/crafting.js';
 import { MATERIAL_META, MATERIAL_ORDER, GRADE_COLOR } from '../constants/materials.js';
 import { legacyOptions } from '../constants/meta.js';
@@ -174,7 +177,9 @@ export default class CombatScene extends Phaser.Scene {
     this.parallax = new ParallaxBackground(this, this.motionOk);
 
     // groundDropY만큼 노면 레이어가 내려가므로 캐릭터 발도 같은 양 내려 노면에 붙게 동기화.
-    this.groundY = COMBAT_H * GROUND_LINE_RATIO + PARALLAX.groundDropY;
+    // _baseGroundY = 공통 바닥선. 지역마다 배경 통로 높이가 달라 groundOffsetY로 보정한다.
+    this._baseGroundY = COMBAT_H * GROUND_LINE_RATIO + PARALLAX.groundDropY;
+    this.groundY = this._baseGroundY + this._regionGroundOffsetY(getRegion(GameState.waveIndex).id);
     this.playerX = LOGICAL.width * CHARACTER.xRatio;
     // maxHP는 GameState가 소유 — 전투 시작 시 풀피로.
     this.maxHP = GameState.stats.maxHP;
@@ -211,8 +216,16 @@ export default class CombatScene extends Phaser.Scene {
       this.input.keyboard?.on('keydown-PERIOD', this._onDebugJump);
     }
 
-    // 적은 일괄 선행로드하지 않는다 — 이 전투의 스폰 목록만 지연 로드 후 시작.
-    this.loadEncounterEnemies(SLICE_SPAWN_LIST, () => this.startEncounter());
+    // 적은 일괄 선행로드하지 않는다 — 현재 지역 스폰 풀만 지연 로드 후 시작.
+    const startPool = regionSpawnPool(this.currentRegionId);
+    this.loadEncounterEnemies(startPool, () => {
+      this._activeSpawnList = startPool.filter((k) => this.textures.exists(k));
+      this.startEncounter();
+    });
+
+    // 첫 실행 인트로(세계관→튜토리얼)는 전용 풀스크린 IntroScene이 담당(PreloadScene이 launch).
+    // 튜토리얼 단계에서 실제 전투/허브 화면 위에 코치마크를 얹으려면 멈춘 화면이 필요해
+    // IntroScene이 이 두 씬을 pause/resume한다 — 여기선 별도 처리 없음.
   }
 
   // [DEBUG] 실제 처치 없이 다음 웨이브로 점프 — onEnemyKilled의 waveChanged side-effect
@@ -353,11 +366,50 @@ export default class CombatScene extends Phaser.Scene {
       if (key) this.parallax.crossfadeToRegion(key, this.motionOk ? 500 : 0);
       else this.parallax.hideRegion();
     });
+    this.applyRegionGround(regionId); // 지역 바닥선 보정(하수도 등)
+    // 지역 적 구성 교체 — 새 지역 풀을 지연 로드한 뒤(미로드 텍스처 스폰 방지) 활성 풀을 교체한다.
+    // 로드 완료 전까지는 직전 풀이 유지돼 빈 구간이 없다(기존 적도 그대로 진행).
+    const pool = regionSpawnPool(regionId);
+    this.loadEncounterEnemies(pool, () => {
+      if (this.currentRegionId !== regionId) return; // 로드 중 또 넘어갔으면 최신 전환이 처리
+      this._activeSpawnList = pool.filter((k) => this.textures.exists(k));
+    });
+  }
+
+  // 지역별 바닥선 보정값(px, +면 화면 아래로). 배경 통로 높이가 지역마다 달라 보정한다.
+  _regionGroundOffsetY(regionId) {
+    return REGION_BY_ID[regionId]?.groundOffsetY || 0;
+  }
+
+  // 지역 진입 시 캐릭터/적/보스가 서는 groundY를 그 지역 바닥선에 맞춰 보정한다.
+  // 적/보스는 매 프레임 자기 groundY를 따라가므로 값만 갱신하면 함께 이동한다.
+  applyRegionGround(regionId) {
+    const newY = this._baseGroundY + this._regionGroundOffsetY(regionId);
+    if (Math.abs(newY - this.groundY) < 0.5) return;
+    this.groundY = newY;
+    if (this.director) {
+      this.director.groundY = newY; // 새 스폰 기준
+      if (this.director.enemies) for (const e of this.director.enemies) e.groundY = newY;
+    }
+    if (this.boss) this.boss.groundY = newY;
+    // 주인공 — 공격 중이면 정리 후, 새 발끝 위치로 스냅하고 idle bob을 새 기준으로 재생성.
+    if (this.character?.active && !this._playerDead) {
+      if (this._attacking) this._forceAttackRecover();
+      this.character.setY(newY);
+      this.shadow?.setY(newY + 4);
+      this.startIdleBob();
+    }
   }
 
   startEncounter() {
+    setNgPlusLevel(GameState.meta.ngPlus); // New Game+ 난이도 주입(waveParams/보스 스탯이 읽음)
+    // 활성 스폰 풀 — 미설정 시(방어적) 현재 지역 풀로 초기화.
+    if (!this._activeSpawnList || !this._activeSpawnList.length) {
+      this._activeSpawnList = regionSpawnPool(this.currentRegionId).filter((k) => this.textures.exists(k));
+    }
     this.director = new CombatDirector(this, {
       spawnList: SLICE_SPAWN_LIST,
+      getSpawnList: () => this._activeSpawnList, // 지역별 적 구성(매 스폰 시 현재 풀)
       groundY: this.groundY,
       depth: this.parallax.topDepth + 1,
       motionOk: this.motionOk,
@@ -1576,12 +1628,43 @@ export default class CombatScene extends Phaser.Scene {
     this.time.delayedCall(0, () => {
       try {
         this.grantBossReward(ox, oy, wi);
-        // 보스 처치 보상으로 업그레이드 카드 — %10/%5 이중발동을 여기로 일원화.
-        this.showUpgradeOverlay(wi);
+        if (isFinalBossWave(wi)) {
+          // 최종 보스(게이트키퍼) 처치 → 탈출 엔딩. 업그레이드 카드 대신 엔딩 시퀀스로.
+          this.triggerVictory(wi);
+        } else {
+          // 보스 처치 보상으로 업그레이드 카드 — %10/%5 이중발동을 여기로 일원화.
+          this.showUpgradeOverlay(wi);
+        }
       } catch (e) {
         console.error('[boss defeat]', e);
       }
     });
+  }
+
+  // ── 탈출 엔딩 (최종 보스 처치) ─────────────────────────────────────────
+  // 전장을 정지(엔딩 동안 잡몹 피해 차단)하고 클리어를 영속 기록한 뒤, 풀스크린 EndingScene을
+  // Combat/Hub 위로 띄운다. "계속"을 누르면 EndingScene이 beginNgPlusRun()을 호출한다.
+  triggerVictory(wi) {
+    if (this._victoryActive) return;
+    this._victoryActive = true;
+    this.teardownEncounter(); // director 정지 + 잡몹 정리(엔딩 중 안전)
+    GameState.recordClear();  // cleared + clearCount++ + ngPlus++ (영속)
+    const summary = {
+      kills: GameState.runKills,
+      wave: GameState.waveIndex,
+      coins: GameState.coins,
+      ngPlus: GameState.meta.ngPlus,
+      clearCount: GameState.meta.clearCount
+    };
+    this.scene.launch('EndingScene', summary);
+  }
+
+  // EndingScene "계속"에서 호출 — 유산 없이 새 런 시작 + NG+ 난이도 반영 + 전투 재구성.
+  beginNgPlusRun() {
+    GameState.setLegacy(null);
+    GameState.startNewRun();       // run 리셋 + runCount++ (ngPlus는 recordClear에서 이미 +1)
+    this.restartRun();             // 새 director(startEncounter가 setNgPlusLevel 주입) + HUD 복원
+    this._victoryActive = false;
   }
 
   // 보스 처치 보상 — 코인(깊이 가산) + 희귀 재료 확정 + 설계도 해금. 줍기 연출 재사용.
@@ -1802,10 +1885,10 @@ export default class CombatScene extends Phaser.Scene {
     // 웨이브 배너(0.3H)와 겹치지 않게 아래쪽(0.46H)에 — 같은 순간 둘 다 떠도 분리돼 읽힌다.
     const banner = this.add.container(LOGICAL.width / 2, COMBAT_H * 0.46).setDepth(76);
     const main = this.add
-      .text(0, 0, 'BOSS', {
+      .text(0, 0, stats.isFinal ? 'FINAL BOSS' : 'BOSS', {
         fontFamily: PIXEL_FONT,
-        fontSize: '30px',
-        color: '#ff2a2a',
+        fontSize: stats.isFinal ? '26px' : '30px',
+        color: stats.isFinal ? '#ffd24a' : '#ff2a2a', // 최종 보스는 골드로 격을 달리
         stroke: '#1a0404',
         strokeThickness: 5
       })
@@ -1977,7 +2060,11 @@ export default class CombatScene extends Phaser.Scene {
     this._flashTintTimer = null;
     this.character?.clearTint();
     if (this._attacking) this._forceAttackRecover();
-    const atlasKey = ANIM_MANIFEST[this.characterStage]?.key;
+    // "보이는 외형 그대로 쓰러지게" — characterStage 변수가 아니라 캐릭터가 실제로 표시 중인
+    // 아틀라스를 기준으로 death를 재생한다. 지연 로드/부팅 폴백으로 변수와 표시 텍스처가
+    // 어긋나 있어도(예: 이어하기 직후), 화면에 보이던 단계 그대로 죽는다.
+    const stage = this._stageOfAtlasKey(this.character?.texture?.key) ?? this.characterStage;
+    const atlasKey = ANIM_MANIFEST[stage]?.key;
     if (!this.motionOk) {
       // reduced-motion — death 애니 생략하되 walk(idleFrame) 대신 death_2(쓰러진 포즈)로 고정.
       if (atlasKey && this.textures.exists(atlasKey)) {
@@ -1985,8 +2072,22 @@ export default class CombatScene extends Phaser.Scene {
       }
       return;
     }
-    const key = this._animKey(this.characterStage, 'death');
-    if (this.anims.exists(key)) this.character.play(key);
+    this._ensureStageAnims(stage); // 보이는 단계의 death 애니 보장(미정의 시 생성)
+    const key = this._animKey(stage, 'death');
+    if (this.anims.exists(key)) {
+      this.character.play(key);
+    } else if (atlasKey && this.textures.exists(atlasKey)) {
+      this.character.setTexture(atlasKey, 'death_2'); // 폴백 — 최소한 쓰러진 포즈
+    }
+  }
+
+  // 캐릭터 아틀라스 텍스처 키 → 단계 번호(1~8). 매칭 없으면 null.
+  _stageOfAtlasKey(key) {
+    if (!key) return null;
+    for (const s of Object.keys(ANIM_MANIFEST)) {
+      if (ANIM_MANIFEST[s].key === key) return Number(s);
+    }
+    return null;
   }
 
   // ── 속박(grab) ──────────────────────────────────────────────────────────
@@ -2912,6 +3013,9 @@ export default class CombatScene extends Phaser.Scene {
     this.updateHpBar();
     this.character.clearTint();
     this._playerDead = false; // 사망 플래그 해제 — 아래 swap/walk가 다시 살아나게(순서 중요)
+    // 새 런(waveIndex=0=downtown)의 바닥선으로 복원 — 직전 런이 보정 지역(하수도 등)에서 끝났어도
+    // 캐릭터 setPosition이 올바른 groundY를 쓰게 먼저 갱신한다.
+    this.groundY = this._baseGroundY + this._regionGroundOffsetY(getRegion(GameState.waveIndex).id);
     // teardown이 idle 트윈을 죽여 x/y/scale/angle이 중간값으로 멈췄을 수 있으니 기준값 복원
     this.character.setPosition(this.playerX, this.groundY).setScale(this.charScale).setAngle(0);
     this.shadow.setScale(1).setAlpha(0.35); // 그림자 bob 기준값 복원
@@ -2924,6 +3028,8 @@ export default class CombatScene extends Phaser.Scene {
     // 새 런 — startNewRun이 waveIndex=0(downtown)으로 리셋했으니 배경도 패럴랙스로 복귀.
     this.currentRegionId = getRegion(GameState.waveIndex).id;
     this.parallax.hideRegion();
+    // 스폰 풀도 새 지역(downtown)으로 — downtown 적은 부팅 선행로드분이라 이미 캐시에 있음.
+    this._activeSpawnList = regionSpawnPool(this.currentRegionId).filter((k) => this.textures.exists(k));
     this.startEncounter(); // 새 director 구성 + refreshWaveHud
   }
 
@@ -3232,16 +3338,6 @@ export default class CombatScene extends Phaser.Scene {
       .rectangle(x + 1, y + 1, w, 1, 0xffffff, 0.22)
       .setOrigin(0, 0)
       .setDepth(62);
-
-    // 좌상단 HUD 세로 리듬 — HP바(8) → 라벨(24) → WAVE(40) → 진행바(56), 일관 16px 스텝.
-    this.add
-      .text(x, 24, 'SCRAPPER', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '10px',
-        color: '#cbb89a'
-      })
-      .setOrigin(0, 0)
-      .setDepth(61);
   }
 
   updateHpBar() {
@@ -3255,21 +3351,35 @@ export default class CombatScene extends Phaser.Scene {
   // ── 웨이브 HUD (HP바/라벨 아래, 좌상단) ──────────────────────────────
   createWaveHud() {
     const x = 10;
-    // WAVE/RUN y=40 — createHud 리듬(8→24→40→56) 연속. 진행바 barY=56로 16px 스텝 유지.
+    const waveY = 24;
+    // SCRAPPER 라벨/진행바 제거 후 좌상단 리듬 압축 — HP바(8) → WAVE·RUN(24), 16px 스텝.
+    // 웨이브 진행도는 별도 바 대신 WAVE 글자 자체가 좌→우로 밝게 차오르는 게이지로 표현.
+    // 구현: 어두운 베이스 글자 위에 밝은 글자를 겹치고, 밝은 글자를 진행도 폭만큼만 마스크로 노출.
+    this._waveStyle = { fontFamily: PIXEL_FONT, fontSize: '13px', color: '#ff6020' };
     this.waveText = this.add
-      .text(x, 40, 'WAVE 0', {
-        fontFamily: PIXEL_FONT,
-        fontSize: '13px',
-        color: '#ff6020'
-      })
+      .text(x, waveY, 'WAVE 0', this._waveStyle)
       .setOrigin(0, 0)
       .setDepth(61);
     this.waveText.setShadow(1, 1, '#000000', 0, false, true);
 
+    // 밝은 골드 오버레이 — 베이스와 완전히 겹친 동일 글자. 마스크로 좌측 일부만 보인다.
+    this.waveTextFill = this.add
+      .text(x, waveY, 'WAVE 0', { ...this._waveStyle, color: '#ffe060' })
+      .setOrigin(0, 0)
+      .setDepth(62);
+
+    // 진행도 게이지 마스크 — 화면에 안 그려지는 그래픽스. 좌측은 불투명, 진행 끝단은
+    // 알파 그라데이션으로 부드럽게 사라지게(페더) 해 딱딱한 절단선 없이 자연스럽게 번진다.
+    // 비트맵 마스크라 알파가 그대로 노출 강도가 됨(0%면 아무것도 안 보여 베이스 한 색상).
+    this._waveMaskX = x;
+    this._waveMaskY = waveY;
+    this._waveMaskG = this.make.graphics();
+    this.waveTextFill.setMask(this._waveMaskG.createBitmapMask());
+
     // RUN #N — WAVE 옆(바 우측 끝선), 회차 표식. WAVE보다 위계상 위라 골드(#f0c040,
     // 사망 오버레이 RUN과 동일 톤)로 구분. 현재 진행 런 = runCount+1(사망 오버레이와 동일).
     this.runText = this.add
-      .text(78, 40, '', {
+      .text(78, waveY, '', {
         fontFamily: PIXEL_FONT,
         fontSize: '13px',
         color: '#f0c040'
@@ -3278,32 +3388,63 @@ export default class CombatScene extends Phaser.Scene {
       .setDepth(61);
     this.runText.setShadow(1, 1, '#000000', 0, false, true);
 
-    const barY = 56;
-    this.waveBarW = 72;
-    this.add
-      .rectangle(x, barY, this.waveBarW + 2, 6, 0x000000, 0.55)
-      .setOrigin(0, 0)
-      .setDepth(60);
-    this.waveBarTrack = this.add
-      .rectangle(x + 1, barY + 1, this.waveBarW, 4, PALETTE.hubSecondary)
-      .setOrigin(0, 0)
-      .setDepth(60);
-    this.waveBarFill = this.add
-      .rectangle(x + 1, barY + 1, 0, 4, COMBAT_COLORS.toxic)
-      .setOrigin(0, 0)
-      .setDepth(61);
+    this._waveFillT = 0; // 현재 표시 중인 진행도(0~1) — 트윈으로 부드럽게 따라감
 
     this.refreshWaveHud();
   }
 
+  // 진행도 t(0~1) → 밝은 글자 노출 폭을 좌→우로 채운다(게이지). 끝단은 페더로 번짐.
+  _applyWaveFill(t) {
+    if (!this._waveMaskG) return;
+    const clamped = Phaser.Math.Clamp(t, 0, 1);
+    const g = this._waveMaskG;
+    g.clear();
+    if (clamped <= 0) return; // 0%면 노출 0 → 베이스 한 색상만 보인다
+    const x = this._waveMaskX;
+    const y = this._waveMaskY;
+    const h = this.waveText.height;
+    const fillW = this.waveText.width * clamped; // 글자 픽셀 폭 기준 채움
+    const feather = Math.min(8, fillW); // 끝단 그라데이션 폭(채움이 좁으면 그만큼만)
+    const solidW = fillW - feather;
+    if (solidW > 0) {
+      g.fillStyle(0xffffff, 1).fillRect(x, y, solidW, h);
+    }
+    // 끝단: 좌(불투명)→우(투명) 알파 그라데이션으로 자연스럽게 사라짐.
+    g.fillGradientStyle(0xffffff, 0xffffff, 0xffffff, 0xffffff, 1, 0, 1, 0)
+      .fillRect(x + solidW, y, feather, h);
+  }
+
   refreshWaveHud() {
     if (!this.waveText) return;
-    this.waveText.setText(`WAVE ${GameState.waveIndex}`);
+    const label = `WAVE ${GameState.waveIndex}`;
+    this.waveText.setText(label);
+    this.waveTextFill?.setText(label);
     // 현재 진행 중 런 번호 = runCount+1 (startNewRun에서 +1 되므로). 새 런 시작 시
     // restartRun→startEncounter→refreshWaveHud 경로로 자동 갱신.
-    this.runText?.setText(`RUN #${GameState.meta.runCount + 1}`);
+    const ngLv = GameState.meta.ngPlus || 0;
+    this.runText?.setText(
+      ngLv > 0 ? `RUN #${GameState.meta.runCount + 1} · NG+${ngLv}` : `RUN #${GameState.meta.runCount + 1}`
+    );
+    // 진행바 대신 WAVE 글자를 좌→우로 채우는 게이지 — 처치 1마다 한 칸씩 차오른다.
     const inWave = GameState.runKills % WAVE.killsPerWave;
-    this.waveBarFill.width = this.waveBarW * (inWave / WAVE.killsPerWave);
+    const target = inWave / WAVE.killsPerWave;
+    if (this.motionOk && this._waveFillTween == null && this._waveFillT !== target) {
+      // 폭 변화를 짧게 트윈해 "차오르는" 인상 — 단발 처치마다 톡톡 끊기지 않게.
+      this._waveFillTween = this.tweens.addCounter({
+        from: this._waveFillT,
+        to: target,
+        duration: 240,
+        ease: 'Sine.easeOut',
+        onUpdate: (tw) => this._applyWaveFill(tw.getValue()),
+        onComplete: () => { this._waveFillT = target; this._waveFillTween = null; }
+      });
+    } else if (!this.motionOk) {
+      this._waveFillT = target;
+      this._applyWaveFill(target);
+    } else {
+      // 트윈 중 텍스트만 갱신된 경우에도 현재 진행도 폭은 다시 반영.
+      this._applyWaveFill(this._waveFillT);
+    }
   }
 
   // 지역 패시브 버프 → 한 줄 라벨 {text,color}. 보너스 없는 지역은 null.

@@ -17,7 +17,9 @@ export const REGIONS = [
   // 공장지대 — 노출된 배선/금속 골조. 감전이 잘 먹힌다.
   { id: 'factory', name: '공장지대', startWave: 10, combatBonus: { SHOCK: 1.3 } },
   // 하수도 — 고인 오수. 독이 퍼지기 좋다.
-  { id: 'sewer', name: '하수도', startWave: 15, combatBonus: { TOXIC: 1.3 } },
+  // groundOffsetY: 이 지역 배경의 통로(바닥선)가 공통 groundY보다 낮아, 캐릭터/적을
+  // 살짝 아래로 내려(+down) 통로 위에 서게 보정한다(다른 지역은 0 = 보정 없음).
+  { id: 'sewer', name: '하수도', startWave: 15, combatBonus: { TOXIC: 1.3 }, groundOffsetY: 14 },
   // 심층 지역 — wave 20+. 깊이질수록 희귀 재료 비중↑(REGION_DROP_MULT 참고).
   { id: 'bunker', name: '지하 벙커', startWave: 20 },
   // 폐병원 — 약품/체액 잔류. 독성 강화.

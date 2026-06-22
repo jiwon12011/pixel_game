@@ -6,6 +6,8 @@ import PreloadScene from '../scenes/PreloadScene.js';
 import CombatScene from '../scenes/CombatScene.js';
 import HubScene from '../scenes/HubScene.js';
 import SettingsScene from '../scenes/SettingsScene.js';
+import IntroScene from '../scenes/IntroScene.js';
+import EndingScene from '../scenes/EndingScene.js';
 
 // antialias:true(LINEAR 필터) — 텍스트 가독성 우선.
 // 이 게임 에셋(캐릭터·배경)은 저해상 픽셀 아트가 아니라 고해상 webp 일러스트라
@@ -44,6 +46,7 @@ export const gameConfig = {
     width: LOGICAL.width * RENDER_SCALE,
     height: LOGICAL.height * RENDER_SCALE
   },
-  // 전투 뷰(Combat)와 합성 허브(Hub)를 독립 씬으로 — 제스처/카메라 분리, 다음 단계 확장 용이
-  scene: [BootScene, PreloadScene, CombatScene, HubScene, SettingsScene]
+  // 전투 뷰(Combat)와 합성 허브(Hub)를 독립 씬으로 — 제스처/카메라 분리, 다음 단계 확장 용이.
+  // IntroScene은 첫 실행 시에만 Combat/Hub 위로 launch되는 풀스크린 인트로(세계관→튜토리얼).
+  scene: [BootScene, PreloadScene, CombatScene, HubScene, SettingsScene, IntroScene, EndingScene]
 };
