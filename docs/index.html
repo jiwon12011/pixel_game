@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>LAST SALVAGE</title>
+
+    <meta name="theme-color" content="#1a1a1a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="./assets/manifest-Cv8xeHSo.webmanifest" />
+
+    <!-- Galmuri11: 한글 지원 픽셀 폰트 (제목/수치용). 못 받아오면 시스템 폰트로 폴백 -->
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/gh/quiple/galmuri/dist/galmuri.css"
+    />
+    <!-- Noto Sans KR: 한글 본문/라벨용 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap"
+    />
+
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0a0805;
+        overflow: hidden;
+        overscroll-behavior: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #game-root {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        /* dvh: 모바일 주소창 변화에도 풀높이 유지 */
+        height: 100dvh;
+        width: 100vw;
+      }
+      /* 브라우저 기본 bilinear 스케일 유지 — 텍스트 가독성.
+         픽셀 아트 스프라이트는 Phaser 내부 NEAREST 필터로 선명도 보장. */
+      #game-root canvas {
+        touch-action: none;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-BMFYYgmi.js"></script>
+  </head>
+  <body>
+    <div id="game-root"></div>
+  </body>
+</html>
