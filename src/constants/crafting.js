@@ -34,10 +34,15 @@ export function defenseMultiplier(def) {
 //   mechanic  — 전투 특수효과(없으면 null)
 //     · shock : 히트 시 chance 확률로 대상 감전 → speed*slowMult, attackCooldown*cdMult, durationMs
 //     · pierce: 사거리 내 2번째 적에게 falloff 배율 추가타(관통타는 메카닉 트리거 제외)
+//     · sweep : 사거리 내 최대 maxTargets명 동시 타격 — 2번째부터 falloff^(i-1) 감쇠(설치형 물량전).
+//               추가타는 pierce처럼 isPierce 경로(guard 무시·메카닉 재트리거 방지) 재사용.
 //     · burn  : chance 확률로 화염 DoT → dmgPerTick씩 tickMs 주기로 durationMs 동안(투척 화염병)
 //     · toxic : chance 확률로 독 DoT(burn과 동일 파라미터) + spreadChance로 가장 가까운 다른 적 1체 전파
 //               DoT 틱은 per-enemy 타이머 없이 director 단일 update에서 처리(perf). 직접타만 적기억 대상.
 //   attrTag   — 무기 속성 태그(R5 적기억 tally 키). FIRE/TOXIC로 적기억 4채널 가동.
+//   rangeMult — 공격 사거리 배수(기본 1.0 = PLAYER.attackRange 92px). 계열 정체성의 핵심:
+//               근접 1.0 / 투척 1.35 / 원거리 1.55~1.6 / 설치 1.1~1.15(+sweep) / 특수 1.3(+strongest)
+//   targetMode— 자동공격 대상 선택('nearest' 기본 / 'strongest' = 사거리 내 현재 HP 최대 — 특수 계열).
 export const WEAPON_RECIPES = {
   pipe_wrench: {
     id: 'pipe_wrench',
@@ -125,6 +130,7 @@ export const WEAPON_RECIPES = {
     cost: { rusty_screws: 3, small_fuel_canister: 2 },
     mechanic: { type: 'burn', chance: 0.5, dmgPerTick: 4, tickMs: 500, durationMs: 2000 },
     attrTag: 'FIRE',
+    rangeMult: 1.35, // 투척 — 근접보다 한 발 먼저 닿는다
     ability: '히트 50% 화상 도트'
   },
   poison_gas_canister: {
@@ -144,6 +150,7 @@ export const WEAPON_RECIPES = {
       spreadChance: 0.4
     },
     attrTag: 'TOXIC',
+    rangeMult: 1.35,
     ability: '35% 중독 · 전파'
   },
   // pipe_bomber — 투척 라인의 두 번째 독립 시작점(근접/molotov 선행 불필요). 물리 직격.
@@ -157,6 +164,7 @@ export const WEAPON_RECIPES = {
     cost: { rusty_screws: 4, scrap_metal_plate: 2 },
     mechanic: null,
     attrTag: 'PHYSICAL',
+    rangeMult: 1.35,
     ability: '파편 직격 투척'
   },
   bio_bomb: {
@@ -176,6 +184,7 @@ export const WEAPON_RECIPES = {
       spreadChance: 0.45
     },
     attrTag: 'TOXIC',
+    rangeMult: 1.35,
     ability: '40% 중독 · 전파'
   },
 
@@ -190,7 +199,8 @@ export const WEAPON_RECIPES = {
     cost: { rusty_screws: 4, scrap_metal_plate: 2 },
     mechanic: { type: 'pierce', falloff: 0.45 },
     attrTag: 'PIERCE',
-    ability: '연사 못 관통 ×0.45'
+    rangeMult: 1.6, // 원거리 — 적 contactRange(≤85) 훨씬 밖에서 선타
+    ability: '원거리 연사 · 못 관통 ×0.45'
   },
   emp_railgun: {
     id: 'emp_railgun',
@@ -202,7 +212,8 @@ export const WEAPON_RECIPES = {
     cost: { copper_wire_coil: 4, old_battery_cell: 2, broken_circuit_board: 1 },
     mechanic: { type: 'shock', chance: 0.35, slowMult: 0.5, cdMult: 1.67, durationMs: 700 },
     attrTag: 'SHOCK',
-    ability: '히트 35% 감전(감속)'
+    rangeMult: 1.6,
+    ability: '장거리 저격 · 35% 감전'
   },
   scrap_mortar: {
     id: 'scrap_mortar',
@@ -214,6 +225,7 @@ export const WEAPON_RECIPES = {
     cost: { scrap_metal_plate: 4, small_fuel_canister: 3, old_battery_cell: 2 },
     mechanic: null,
     attrTag: 'PHYSICAL',
+    rangeMult: 1.55, // 고화력 대신 레일건보다 살짝 짧게(트레이드오프)
     ability: '고철 박격 · 고화력 직격'
   },
 
@@ -226,9 +238,10 @@ export const WEAPON_RECIPES = {
     cooldown: 1000,
     requires: null,
     cost: { rusty_screws: 5, scrap_metal_plate: 2 },
-    mechanic: null,
+    mechanic: { type: 'sweep', falloff: 0.75, maxTargets: 2 },
     attrTag: 'PHYSICAL',
-    ability: '가시철망 · 근접 견제'
+    rangeMult: 1.1, // 설치 — 근접보다 살짝 넓은 "존"을 한 번에 쓸어버린다
+    ability: '철망 존 · 2체 동시 타격'
   },
   shock_cable: {
     id: 'shock_cable',
@@ -240,6 +253,7 @@ export const WEAPON_RECIPES = {
     cost: { copper_wire_coil: 5, old_battery_cell: 2 },
     mechanic: { type: 'shock', chance: 0.3, slowMult: 0.5, cdMult: 1.67, durationMs: 650 },
     attrTag: 'SHOCK',
+    rangeMult: 1.15,
     ability: '히트 30% 감전(감속)'
   },
   trash_can_turret: {
@@ -250,9 +264,10 @@ export const WEAPON_RECIPES = {
     cooldown: 700,
     requires: 'barbed_wire_trap',
     cost: { scrap_metal_plate: 4, copper_wire_coil: 3, broken_circuit_board: 1 },
-    mechanic: null,
+    mechanic: { type: 'sweep', falloff: 0.7, maxTargets: 3 },
     attrTag: 'PHYSICAL',
-    ability: '고철 포탑 · 연속 화력'
+    rangeMult: 1.15,
+    ability: '포탑 존 · 3체 동시 사격'
   },
 
   // ── 특수 트리(R8) — grappling_gun 시작. 물리 견제·고화력. ─────────────────
@@ -266,7 +281,9 @@ export const WEAPON_RECIPES = {
     cost: { rusty_screws: 4, copper_wire_coil: 3 },
     mechanic: null,
     attrTag: 'PHYSICAL',
-    ability: '갈고리 사출 · 견제'
+    rangeMult: 1.3, // 특수 — 잡몹 대신 가장 위험한 적부터 끌어내린다
+    targetMode: 'strongest',
+    ability: '갈고리 견제 · 강한 적 우선'
   },
   gravity_disassembler: {
     id: 'gravity_disassembler',
@@ -278,7 +295,9 @@ export const WEAPON_RECIPES = {
     cost: { old_battery_cell: 2, broken_circuit_board: 2, chemical_vial: 2 },
     mechanic: null,
     attrTag: 'PHYSICAL',
-    ability: '중력 분해 · 고화력'
+    rangeMult: 1.3,
+    targetMode: 'strongest',
+    ability: '중력 분해 · 강한 적 우선'
   }
 };
 

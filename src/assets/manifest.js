@@ -81,6 +81,8 @@ import matScrapMetalPlateUrl from '../../assets/ai-generated/items/materials/web
 import matOldBatteryCellUrl from '../../assets/ai-generated/items/materials/web/old_battery_cell.webp';
 import matChemicalVialUrl from '../../assets/ai-generated/items/materials/web/chemical_vial.webp';
 import matBrokenCircuitBoardUrl from '../../assets/ai-generated/items/materials/web/broken_circuit_board.webp';
+// 설정 버튼 아이콘 — 재료 아트와 동일 파이프라인의 녹슨 톱니(재료로는 미사용, UI 전용 재활용).
+import gearFragmentUrl from '../../assets/ai-generated/items/materials/web/gear_fragment.webp';
 
 // 무기 아이콘 18종 — 합성 탭 첫 진입 시 지연 로드(WEAPON_MANIFEST). 키 = 무기 id(파일명).
 // 재생성: npm run optimize:assets (weapons 카테고리, 128px webp, lossless:false q85)
@@ -149,7 +151,8 @@ export const TEX = {
   COIN_REWARD: 'coin-reward',
   SCRAP_PARTS: 'scrap-parts',
   SKILL_POINT: 'skill-point',
-  NOTIFICATION_BADGE: 'notification-badge'
+  NOTIFICATION_BADGE: 'notification-badge',
+  SETTINGS_GEAR: 'ui-settings-gear'
 };
 
 // PreloadScene이 순회하며 this.load.image(key, url) 하는 일괄 선행로드 목록.
@@ -175,7 +178,9 @@ export const IMAGE_MANIFEST = [
   { key: 'mat-scrap-metal-plate', url: matScrapMetalPlateUrl },
   { key: 'mat-old-battery-cell', url: matOldBatteryCellUrl },
   { key: 'mat-chemical-vial', url: matChemicalVialUrl },
-  { key: 'mat-broken-circuit-board', url: matBrokenCircuitBoardUrl }
+  { key: 'mat-broken-circuit-board', url: matBrokenCircuitBoardUrl },
+  // 설정 버튼 톱니 — HUD 상시 노출이라 선행 로드(4.9KB)
+  { key: TEX.SETTINGS_GEAR, url: gearFragmentUrl }
 ];
 
 // 진행 단계 텍스처 1~8 — stage 번호 → { key, url }. stage_01만 선행로드(IMAGE_MANIFEST),

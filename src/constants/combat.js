@@ -33,6 +33,7 @@ export const ELITE = {
   minWave: 4,      // 이 웨이브부터 엘리트 등장(초반 난이도 보호)
   chance: 0.1,     // 일반 스폰당 엘리트 승격 확률
   hpMult: 2.2,     // 엘리트 추가 HP 배율(웨이브 hpMult에 곱연산)
+  dmgMult: 1.2,    // 엘리트 근접 피해 배율 — 단단하기만 한 게 아니라 실제로 위험하게
   scale: 1.18,     // 스프라이트/표시높이 배율(작은 화면에서 한눈에 큰 적)
   coinMult: 1.5,   // 처치 코인 배율
   coinBonus: 10    // 처치 코인 가산(배율 후)
@@ -45,6 +46,12 @@ export const PLAYER = {
   attackRange: 92, // 적이 이 거리(주인공 x 기준) 안에 들면 자동 공격
   dangerThreshold: 0.25 // HP 비율 이하 → 위험 펄스
 };
+
+// 장착 무기 → 실제 공격 사거리. rangeMult(계열 정체성: 근접 1.0/투척 1.35/원거리 1.6/
+// 설치 1.1~1.15/특수 1.3)를 기본 사거리에 곱한다. 무기 미지정 시 기본 사거리.
+export function weaponRange(weapon) {
+  return PLAYER.attackRange * (weapon?.rangeMult ?? 1);
+}
 
 // ── 무기 손표시 (R7 #6) ─────────────────────────────────────────────────
 // stage_01은 맨손이라 장착 무기 아이콘을 손 근처에 오버레이한다. 헤드리스라 정확한

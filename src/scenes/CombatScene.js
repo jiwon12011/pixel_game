@@ -25,6 +25,7 @@ import {
   DROP,
   ELITE,
   WEAPON_HAND,
+  weaponRange,
   waveParams,
   ENEMY_MEMORY_MAP,
   bossStatsForWave,
@@ -70,13 +71,19 @@ const DMG_POOL_MAX = 24;
 // 무기 정체성은 HUD 장착표시 + 속성별 타격 VFX로 전달. 되살리려면 true.
 const SHOW_HAND_WEAPON = false;
 
-// 난이도 곡선 — 적 피해 배율을 웨이브에 따라 보간(초반 쉽게 → 후반 원래대로).
+// 난이도 곡선 — 적 피해 배율을 웨이브에 따라 보간(초반 쉽게 → 후반 계속 조여오게).
 //   wave 0: EASY_START(0.60, 40%↓) → wave RAMP_WAVES(14)에서 1.0(기본)으로 선형 회복.
-//   이후 웨이브는 1.0 고정(원래 난이도). takePlayerDamage 단일 통로에서 곱해진다(독 투척 포함).
+//   램프 이후: +1.3%/wave, 캡 1.45(최종보스 wave 49 부근 정점) — HP만 오르던 후반
+//   HP스펀지화를 막고 피해 압박도 함께 상승(ideator 곡선). 회복 수단이 적어 캡을 낮게 유지.
+//   takePlayerDamage 단일 통로에서 곱해진다(독 투척 포함).
 const DIFFICULTY_EASY_START = 0.6;
 const DIFFICULTY_RAMP_WAVES = 14;
+const DIFFICULTY_LATE_SLOPE = 0.013;
+const DIFFICULTY_LATE_CAP = 1.45;
 function difficultyDmgMult(wave) {
-  if (wave >= DIFFICULTY_RAMP_WAVES) return 1.0;
+  if (wave >= DIFFICULTY_RAMP_WAVES) {
+    return Math.min(DIFFICULTY_LATE_CAP, 1.0 + DIFFICULTY_LATE_SLOPE * (wave - DIFFICULTY_RAMP_WAVES));
+  }
   const t = Math.max(0, wave) / DIFFICULTY_RAMP_WAVES; // 0→1
   return DIFFICULTY_EASY_START + (1.0 - DIFFICULTY_EASY_START) * t;
 }
@@ -422,6 +429,9 @@ export default class CombatScene extends Phaser.Scene {
         // R9 cooldown_down — 레벨당 쿨타임 ×0.88(곱연산). 미선택(lv0)이면 ×1.
         getAttackCooldown: () =>
           this.currentWeapon().cooldown * Math.pow(0.88, GameState.getModifier('cooldown_down')),
+        // 계열 정체성 — 사거리(rangeMult)와 대상 선택(nearest/strongest)은 장착 무기가 결정.
+        getAttackRange: () => weaponRange(this.currentWeapon()),
+        getTargetMode: () => this.currentWeapon().targetMode || 'nearest',
         attack: (enemy) => this.playerAttack(enemy),
         takeDamage: (amount) => this.takePlayerDamage(amount),
         // 속박(grab seam B) — 자동공격 봉쇄 + 시각 신호. isBound는 director 자동공격 게이트가 읽음.
@@ -998,7 +1008,7 @@ export default class CombatScene extends Phaser.Scene {
 
       // 관통 메카닉 — 사거리 내 2번째 적에게 falloff 추가타(감전 트리거 제외).
       if (weapon.mechanic?.type === 'pierce' && this.director) {
-        const inRange = this.director.enemiesInRange(this.playerX, PLAYER.attackRange);
+        const inRange = this.director.enemiesInRange(this.playerX, weaponRange(weapon));
         const second = inRange.find((e) => e !== enemy && !e.dead);
         if (second) {
           this.dealDamage(second, base * weapon.mechanic.falloff, true);
@@ -1009,6 +1019,33 @@ export default class CombatScene extends Phaser.Scene {
             this._spawnImpactSparks(second, c);
           }
         }
+      }
+
+      // 설치형 sweep — 사거리 "존" 내 최대 maxTargets명 동시 타격. 2번째부터 falloff^(i)
+      // 감쇠, isPierce 경로 재사용(guard 무시·메카닉 재트리거 방지). 대상마다 30ms 스태거로
+      // 연쇄 임팩트(라이트닝 체인 체감) — 신규 이펙트 없이 기존 슬래시/스파크/넉백 재사용.
+      if (weapon.mechanic?.type === 'sweep' && this.director) {
+        const mech = weapon.mechanic;
+        const zone = this.director
+          .enemiesInRange(this.playerX, weaponRange(weapon))
+          .filter((e) => e !== enemy && !e.dead)
+          .slice(0, Math.max(0, (mech.maxTargets || 2) - 1));
+        zone.forEach((t, i) => {
+          const dmg = base * Math.pow(mech.falloff, i + 1);
+          const strike = () => {
+            if (t.dead) return;
+            this.dealDamage(t, dmg, true);
+            if (this.motionOk) {
+              const c = this._slashColorForWeapon();
+              this._spawnPunchImpact(t, c);
+              this._spawnImpactSparks(t, c);
+              this._applyEnemyKnockback(t);
+            }
+          };
+          // reduced-motion은 즉시 일괄 적용(스태거는 연출일 뿐 판정 지연이 아니게 짧게 유지).
+          if (this.motionOk) this.time.delayedCall(30 * (i + 1), strike);
+          else strike();
+        });
       }
 
       // 히트스톱 + 카메라 셰이크 + 임팩트 VFX — 프레임 임팩트(attack_2)와 동기. reduced-motion 시 전체 생략.
@@ -1444,6 +1481,7 @@ export default class CombatScene extends Phaser.Scene {
     }
 
     // 3) 코인 — 즉시 자동 가산 + 우상단 HUD로 빨려가는 연출(기존 동작 유지).
+    //    획득량은 작은 골드 "+N"으로 드롭 위치에 표기(데미지 숫자 풀 재사용, small=팝 없이 잔잔하게).
     if (drop.coins) {
       GameState.applyDrop({ coins: drop.coins }, x, y);
       this.flyPickup(
@@ -1453,6 +1491,7 @@ export default class CombatScene extends Phaser.Scene {
         this.resHud.coins,
         0
       );
+      this.spawnDamageNumber(x, y - 14, `+${drop.coins}`, '#f0c040', false, true);
     }
 
     // 4) 재료 — 코인처럼 즉시 자동 가산 + 팝→인벤 빨려가기 연출. 땅 줍기(탭) 폐지.
@@ -1495,7 +1534,46 @@ export default class CombatScene extends Phaser.Scene {
       this._comboGradeBumpPending = true;
       this._comboSurge(); // 역동감 — 마일스톤 화면 서지
     }
+    // 콤보 15 도달 — 스트릭당 1회 "RAMPAGE!" 대형 팝(기억에 남는 순간, ideator C안).
+    if (this.comboCount === 15) this._showRampagePop();
     this._updateComboHud();
+  }
+
+  // 전투 뷰 중앙 대형 픽셀 텍스트 팝 — 콤보 15 임계 1회성 연출. 신규 리소스 없이 텍스트+트윈만.
+  // reduced-motion은 정적 표시 후 제거(모션 없이도 순간은 전달).
+  _showRampagePop() {
+    const txt = this.add
+      .text(Math.round(LOGICAL.width / 2), Math.round(COMBAT_H * 0.34), 'RAMPAGE!', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '26px',
+        color: '#ff6020'
+      })
+      .setOrigin(0.5)
+      .setDepth(70);
+    txt.setShadow(2, 2, '#000000', 0, false, true);
+    if (!this.motionOk) {
+      this.time.delayedCall(800, () => txt.destroy());
+      return;
+    }
+    txt.setScale(0.3).setAlpha(0);
+    this.tweens.add({
+      targets: txt,
+      scale: 1,
+      alpha: 1,
+      duration: 180,
+      ease: 'Back.out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: txt,
+          alpha: 0,
+          y: txt.y - 18,
+          delay: 520,
+          duration: 260,
+          ease: 'Quad.in',
+          onComplete: () => txt.destroy()
+        });
+      }
+    });
   }
 
   // 콤보 HUD 갱신 — 카운터 텍스트/색 티어 + 팝. COMBO_HUD_MIN 미만이면 숨김(1킬 노이즈 방지).
@@ -2042,8 +2120,8 @@ export default class CombatScene extends Phaser.Scene {
       return;
     }
 
-    // 사거리 내 가장 가까운(=worldX 최솟값) 살아있는 적 1체. 없으면 헛스윙 없이 무시.
-    const inRange = this.director.enemiesInRange(this.playerX, PLAYER.attackRange);
+    // 사거리(장착 무기 rangeMult 반영) 내 가장 가까운 살아있는 적 1체. 없으면 헛스윙 없이 무시.
+    const inRange = this.director.enemiesInRange(this.playerX, weaponRange(this.currentWeapon()));
     const target = inRange.find((e) => !e.dead);
     if (!target) return;
 
@@ -3386,7 +3464,7 @@ export default class CombatScene extends Phaser.Scene {
     this.hpBarW = w;
 
     this.add
-      .rectangle(x, y, w + 2, h + 2, 0x000000, 0.55)
+      .rectangle(x, y, w + 2, h + 2, 0x000000, 0.75) // designer: 0.55→0.75 — 엣지 대비 강화
       .setOrigin(0, 0)
       .setDepth(60);
     this.add
@@ -3402,14 +3480,32 @@ export default class CombatScene extends Phaser.Scene {
       .rectangle(x + 1, y + 1, w, 1, 0xffffff, 0.22)
       .setOrigin(0, 0)
       .setDepth(62);
+    // HP 수치 — 바 안쪽 중앙 "현재/최대". 바깥 우측은 코인 HUD와 붙어 한 덩어리로 읽혀
+    // 안쪽 배치로 변경(흰 글자 + 그림자 — 골드 채움/어두운 트랙 어디 위서든 읽힘).
+    this.hpText = this.add
+      .text(x + 1 + w / 2, y + 1 + h / 2, '', {
+        fontFamily: PIXEL_FONT,
+        fontSize: '9px',
+        color: '#ffffff'
+      })
+      .setOrigin(0.5)
+      .setDepth(63);
+    this.hpText.setShadow(1, 1, '#000000', 0, false, true);
+    this.updateHpBar(); // 첫 프레임부터 수치 노출(피격 전 빈 텍스트 방지)
   }
 
   updateHpBar() {
     const ratio = Phaser.Math.Clamp(this.playerHP / this.maxHP, 0, 1);
     this.hpFill.width = this.hpBarW * ratio;
-    // 위험 구간이면 바 색도 주황으로
+    // 구간별 3색 (designer) — >50% 골드 / 25~50% 황토(경고 예고) / ≤25% 주황(위험).
     this.hpFill.fillColor =
-      ratio <= PLAYER.dangerThreshold ? COMBAT_COLORS.electric : COMBAT_COLORS.gold;
+      ratio <= PLAYER.dangerThreshold
+        ? COMBAT_COLORS.electric
+        : ratio <= 0.5
+          ? 0xd4a040
+          : COMBAT_COLORS.gold;
+    // 수치는 바 안쪽 흰 글자 고정(바 색이 이미 구간을 전달).
+    this.hpText?.setText(`${Math.max(0, Math.ceil(this.playerHP))}/${this.maxHP}`);
   }
 
   // ── 웨이브 HUD (HP바/라벨 아래, 좌상단) ──────────────────────────────
@@ -3660,49 +3756,22 @@ export default class CombatScene extends Phaser.Scene {
   // 오프셋 뷰포트 환경에서 per-object setInteractive가 어긋나는 걸 피하는 기존 패턴 그대로).
   // 탭하면 SettingsScene을 launch(전체 화면 모달).
   createSettingsButton() {
-    const w = 24; // designer: 18→24 — 작아서 톱니 디테일이 죽던 걸 키움
+    const w = 24;
     const h = 20;
     const x = LOGICAL.width - w - 4; // 맨 우상단 코너
     const y = 6; // 상단 코너 — 코인(좌측)과 같은 띠, x로 분리
     this._settingsBounds = { x, y, w, h };
 
-    // 배경 박스(유저 거부) 대신 은은한 원형 링 테두리로 "버튼"임을 암시 — 부동감 해소.
+    // 코드로 그리던 톱니(_drawGear)가 게임 아트와 결이 안 맞아 → 재료 아트 파이프라인의
+    // 녹슨 톱니(gear_fragment, 미사용 애셋 재활용)로 교체. 링/받침 없이 아이콘 단독(사용자 결정)
+    // — 아트 자체에 어두운 외곽선이 있어 하늘 위에서도 형태가 선다.
     const cx = x + w / 2;
     const cy = y + h / 2;
-    const ring = this.add.graphics().setDepth(62);
-    ring.fillStyle(0x000000, 0.18); // 톱니 뒤 아주 옅은 다크 원(대비 받침)
-    ring.fillCircle(cx, cy, 10.5);
-    ring.lineStyle(1, 0xf0c040, 0.45); // 금색 1px 링
-    ring.strokeCircle(cx, cy, 10.5);
-    const g = this.add.graphics().setDepth(63);
-    this._drawGear(g, cx, cy, 0xf0c040);
-  }
-
-  // 톱니 아이콘 — 8개 이빨(사다리꼴) + 작은 본체 링 + 가운데 구멍.
-  // 핵심: 본체 반경(3.0) < 이빨 안쪽(4.5)이라 톱니가 본체 앞으로 확실히 돌출 → "기어"로 읽힘.
-  _drawGear(g, cx, cy, color) {
-    g.clear();
-    const rHole = 1.5; // 가운데 구멍(작게 — 링 비율 강화)
-    const half = 0.35; // 이빨 각폭(라디안) 절반
-
-    // 톱니+본체 한 패스 — 어두운 외곽선 → 금색 본체 2패스로 대비 확보.
-    const draw = (col, rBody, rToothIn, rToothOut, tHalf) => {
-      g.fillStyle(col, 1);
-      for (let i = 0; i < 8; i++) {
-        const a = (i * Math.PI) / 4;
-        const p = (rad, da) => ({ x: cx + Math.cos(a + da) * rad, y: cy + Math.sin(a + da) * rad });
-        g.fillPoints(
-          [p(rToothIn, -tHalf), p(rToothIn, tHalf), p(rToothOut, tHalf * 1.25), p(rToothOut, -tHalf * 1.25)],
-          true
-        );
-      }
-      g.fillCircle(cx, cy, rBody);
-    };
-
-    draw(0x000000, 3.8, 4.5, 9.5, half + 0.12); // 외곽선(살짝 크게, 어둡게)
-    draw(color, 3.0, 4.5, 8.5, half); // 본체(금색) — rBody<rToothIn이 핵심
-    g.fillStyle(0x000000, 1); // 가운데 구멍
-    g.fillCircle(cx, cy, rHole);
+    const src = this.textures.get(TEX.SETTINGS_GEAR).getSourceImage();
+    this.add
+      .image(cx, cy, TEX.SETTINGS_GEAR)
+      .setScale(21 / src.height)
+      .setDepth(63);
   }
 
   // ── 드롭 줍기 연출 ─────────────────────────────────────────────────────

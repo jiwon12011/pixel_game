@@ -137,6 +137,7 @@ export default class CombatDirector {
       }
     });
     enemy.director = this; // ctx 배선 — 행동 패턴이 director 참조 가능(seam D 등)
+    if (elite) enemy.dmgMult = ELITE.dmgMult; // 엘리트 — HP만 아니라 타격도 아프게
     this.enemies.push(enemy);
 
     // 위험 패턴 등장 경고 — 엘리트(승격) 또는 그래버(속박형). 표시/쿨다운은 scene이 판단.
@@ -190,7 +191,7 @@ export default class CombatDirector {
         if (e.attackTimer <= 0) {
           e.attackTimer = e.getAttackCooldown(); // 감전 시 쿨다운 늘어남
           e.lungeAttack();
-          this.player.takeDamage(e.def.damage);
+          this.player.takeDamage(e.def.damage * (e.dmgMult || 1)); // 엘리트는 ELITE.dmgMult
           // [seam B] 근접 타격 성립 — grab(속박) 등 onContact 행동 발동(부작용은 ctx 콜백 경유).
           e.behavior?.onContact?.(e, this._contactCtx);
         }
@@ -206,11 +207,17 @@ export default class CombatDirector {
       }
     }
 
-    // 주인공 자동 공격 — 사거리 내 가장 가까운 적. 쿨다운은 장착 무기가 결정.
+    // 주인공 자동 공격 — 사거리/대상 선택은 장착 무기가 결정(계열 정체성).
+    //   사거리: getAttackRange(rangeMult 반영, 미제공 시 기본 92)
+    //   대상: 기본 nearest / 특수 계열 'strongest'(사거리 내 현재 HP 최대 — 탱크·엘리트 우선)
     // 속박(grab) 중이면 쿨다운은 흘려보내되 타격은 skip — 풀리는 즉시 다시 때린다.
     this.playerAtkCd -= dtMs;
     if (this.playerAtkCd <= 0 && !this.player.isBound?.()) {
-      const target = this.nearestInRange(px, PLAYER.attackRange);
+      const range = this.player.getAttackRange?.() ?? PLAYER.attackRange;
+      const target =
+        this.player.getTargetMode?.() === 'strongest'
+          ? this.strongestInRange(px, range)
+          : this.nearestInRange(px, range);
       if (target) {
         this.playerAtkCd = this.player.getAttackCooldown();
         this.player.attack(target);
@@ -234,6 +241,22 @@ export default class CombatDirector {
       if ((dist <= range || e.inRange) && dist < bestDist) {
         best = e;
         bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  // 특수 계열(targetMode 'strongest') — 사거리 내 현재 HP가 가장 높은 적.
+  // 잡몹 대신 탱크/엘리트/보스부터 견제하는 "위협 제어" 정체성. nearestInRange와 동일 판정 규칙.
+  strongestInRange(px, range) {
+    let best = null;
+    let bestHp = -1;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const dist = e.worldX - px;
+      if ((dist <= range || e.inRange) && e.hp > bestHp) {
+        best = e;
+        bestHp = e.hp;
       }
     }
     return best;
