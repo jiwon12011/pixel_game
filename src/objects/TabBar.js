@@ -67,7 +67,17 @@ export default class TabBar extends Phaser.GameObjects.Container {
         .setInteractive({ useHandCursor: true });
       hit.on('pointerdown', () => this.setActive(i));
 
-      this.cells.push({ hl, icon, label, underline, hit });
+      // 알림 뱃지 — 아이콘 우상단(+12,-12). "지금 할 수 있는 행동" 수를 주황 원으로 알린다.
+      // 컨테이너로 묶어 팝인 트윈 대상 1개로. 기본 숨김 — setBadge(i, n)이 토글.
+      const badgeDot = scene.add.circle(0, 0, 8, 0xff6020).setStrokeStyle(1, 0x000000, 0.6);
+      const badgeNum = scene.add
+        .text(0, -0.5, '', { fontFamily: BODY_FONT, fontSize: '10px', color: '#ffffff' })
+        .setOrigin(0.5);
+      const badge = scene.add
+        .container(cx + 12, cy - 20, [badgeDot, badgeNum])
+        .setVisible(false);
+
+      this.cells.push({ hl, icon, label, underline, hit, badge, badgeNum, badgeCount: 0 });
     });
 
     // 키보드 접근성: 좌우로 탭 이동. 핸들러를 참조로 잡아 씬 종료 시 off(누수 방지).
@@ -91,6 +101,47 @@ export default class TabBar extends Phaser.GameObjects.Container {
     this.active = i;
     this.refresh();
     this.cfg.onChange?.(i, this.cfg.tabs[i]);
+  }
+
+  // 탭 뱃지 갱신(멱등) — n=0이면 숨김. 새로 나타날 때만 팝인(reduced-motion은 즉시 표시).
+  setBadge(i, n) {
+    const c = this.cells[i];
+    if (!c) return;
+    n = Math.max(0, n | 0);
+    if (n === c.badgeCount) return;
+    const appearing = n > 0 && c.badgeCount === 0;
+    c.badgeCount = n;
+    if (n === 0) {
+      this.scene.tweens.killTweensOf(c.badge);
+      c.badge.setVisible(false);
+      return;
+    }
+    c.badgeNum.setText(n > 9 ? '9+' : String(n));
+    c.badge.setVisible(true);
+    if (appearing && this.cfg.motionOk) {
+      // 팝인 + 짧은 맥동 2회 — "새 신호"만 움직이고, 수치 갱신은 조용히.
+      this.scene.tweens.killTweensOf(c.badge);
+      c.badge.setScale(0.2).setAlpha(0);
+      this.scene.tweens.add({
+        targets: c.badge,
+        scale: 1,
+        alpha: 1,
+        duration: 200,
+        ease: 'Back.out',
+        onComplete: () => {
+          this.scene.tweens.add({
+            targets: c.badge,
+            scale: 1.15,
+            duration: 400,
+            ease: 'Sine.inOut',
+            yoyo: true,
+            repeat: 1
+          });
+        }
+      });
+    } else {
+      c.badge.setScale(1).setAlpha(1);
+    }
   }
 
   refresh() {

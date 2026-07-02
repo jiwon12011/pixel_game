@@ -145,7 +145,10 @@ export default class HubScene extends Phaser.Scene {
   }
 
   bindGameState() {
-    const off = GameState.on('change', () => this.refreshActive?.());
+    const off = GameState.on('change', () => {
+      this.refreshActive?.();
+      this.refreshBadges();
+    });
     this.events.once('shutdown', off);
     this.events.once('shutdown', () => this.teardownScroll());
   }
@@ -191,6 +194,20 @@ export default class HubScene extends Phaser.Scene {
       .rectangle(LOGICAL.width / 2, CONTENT.y + CONTENT.h / 2, CONTENT.w, CONTENT.h, 0x121212, 1)
       .setStrokeStyle(1, 0x000000, 0.6)
       .setDepth(5);
+
+    // 작업대 질감(designer) — 상단 1px 하이라이트 + 모서리 볼트. "트럭 짐칸 금속판" 컨셉을
+    // 그래픽 몇 줄로만 암시(전면 리워크 금지 — 기존 플랫 패널 유지).
+    const left = LOGICAL.width / 2 - CONTENT.w / 2;
+    const top = CONTENT.y;
+    const g = this.add.graphics().setDepth(6);
+    g.fillStyle(0x2d2416, 0.3); // 윗면에 닿는 은은한 광 — 눌린 철판의 입체감
+    g.fillRect(left, top, CONTENT.w, 1);
+    const bolt = (x, y) => {
+      g.fillStyle(0x4a3d2a, 0.7);
+      g.fillCircle(x, y, 1.5);
+    };
+    bolt(left + 4, top + 3);
+    bolt(left + CONTENT.w - 4, top + 3);
   }
 
   createTabBar() {
@@ -201,8 +218,20 @@ export default class HubScene extends Phaser.Scene {
       width: LOGICAL.width,
       height: tabBarH,
       tabs: TABS,
+      motionOk: this.motionOk, // 뱃지 팝인 트윈 on/off (reduced-motion 존중)
       onChange: (_i, tab) => this.showTab(tab)
     });
+  }
+
+  // 탭 알림 뱃지 — "지금 할 수 있는 행동" 수를 각 탭에 표시. 보고 있는 탭은 숨김
+  // (내용의 글로우/버튼이 이미 신호). 'change'·탭 전환마다 호출(계산 가벼움).
+  refreshBadges() {
+    if (!this.tabBar) return;
+    const a = GameState.actionableCounts();
+    const byKey = { craft: a.craft, enhance: a.enhance, stats: a.stats, inv: 0 };
+    TABS.forEach((tab, i) =>
+      this.tabBar.setBadge(i, tab.key === this.activeTab ? 0 : byKey[tab.key] || 0)
+    );
   }
 
   // ── 탭 디스패치 ──────────────────────────────────────────────────────
@@ -219,6 +248,7 @@ export default class HubScene extends Phaser.Scene {
     else if (tab.key === 'enhance') this.buildPermanentTab();
     else this.buildStubTab(tab);
 
+    this.refreshBadges(); // 탭 전환 즉시 뱃지 재계산(보고 있는 탭은 숨김, 떠난 탭은 복원)
     SFX.play('tab'); // 탭 전환 blip (최초 create() 호출 땐 제스처 전이라 무음)
   }
 

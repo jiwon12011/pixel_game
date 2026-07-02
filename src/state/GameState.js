@@ -21,7 +21,9 @@ import {
   WEAPON_RECIPES,
   ENHANCE_MAX_LEVEL,
   ENHANCE_ATK_PER_LEVEL,
-  enhanceCost
+  ENHANCE_BASE_COST,
+  enhanceCost,
+  upgradeCost
 } from '../constants/crafting.js';
 import { MATERIAL_ORDER, freshMaterials } from '../constants/materials.js';
 import {
@@ -336,6 +338,37 @@ const GameState = {
   // 줍기 반경이 무의미해져 재해석: onEnemyKilled가 재료 종별로 이 확률만큼 +1 추가 드롭.
   getMaterialDropChance() {
     return 0.25 * (this.meta.permanentUpgrades.scrap_magnet || 0);
+  },
+
+  // ── 탭 알림 뱃지 (허브) ──────────────────────────────────────────────
+  // "지금 실행 가능한 행동" 수 — craft: 제작 가능 무기 / stats: 구매 가능 능력치 /
+  // enhance: 구매 가능 영구 강화. 판정은 각 구매 경로(craftWeapon/upgradeStat/
+  // buyPermanentUpgrade)와 동일 규칙을 읽기 전용으로 재현한다('change'마다 호출 — 가볍게).
+  actionableCounts() {
+    let craft = 0;
+    for (const id of Object.keys(WEAPON_RECIPES)) {
+      if (this.ownedWeapons.has(id)) continue;
+      const r = WEAPON_RECIPES[id];
+      if (r.requires && !this.ownedWeapons.has(r.requires)) continue;
+      const base = Object.keys(r.cost || {}).length > 0 ? r.cost : ENHANCE_BASE_COST[id] || {};
+      if (this.canAfford(this.effectiveCraftCost(base))) craft++;
+    }
+    let stats = 0;
+    for (const stat of Object.keys(STAT_UPGRADES)) {
+      const def = STAT_UPGRADES[stat];
+      const lvl = this.statLevels[stat] || 0;
+      if (def.maxLevel != null && lvl >= def.maxLevel) continue;
+      if (this.coins >= upgradeCost(stat, lvl + 1)) stats++;
+    }
+    let enhance = 0;
+    for (const key of Object.keys(PERMANENT_UPGRADES)) {
+      const def = PERMANENT_UPGRADES[key];
+      const cur = this.meta.permanentUpgrades[key];
+      const level = def.flag ? (cur ? 1 : 0) : cur || 0;
+      if (level >= def.maxLevel) continue;
+      if (this.meta.salvagePoints >= def.costs[level]) enhance++;
+    }
+    return { craft, stats, enhance };
   },
 
   // ── 유산/런 사이클 ───────────────────────────────────────────────────
